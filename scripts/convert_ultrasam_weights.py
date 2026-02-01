@@ -15,8 +15,18 @@ import torch
 from collections import OrderedDict
 
 
-class _MockObject:
-    """A universal mock that supports arbitrary attribute access, calls, and pickle."""
+class _MockMeta(type):
+    """Metaclass that makes class-level attribute access return the class itself."""
+    def __getattr__(cls, name):
+        return cls
+
+
+class _MockObject(metaclass=_MockMeta):
+    """A universal mock that supports arbitrary attribute access, calls, and pickle.
+
+    Both class-level (e.g. _MockObject.min) and instance-level attribute access
+    return _MockObject, so pickle can resolve any attribute chain.
+    """
     def __init__(self, *args, **kwargs):
         pass
 
@@ -32,9 +42,11 @@ class _MockObject:
     def __reduce_ex__(self, protocol):
         return (_MockObject, ())
 
-    @classmethod
     def __class_getitem__(cls, item):
         return cls
+
+    def __repr__(self):
+        return '_MockObject'
 
 
 class _MockModule(types.ModuleType):
@@ -48,18 +60,22 @@ class _MockModule(types.ModuleType):
         return _MockObject
 
 
+_MOCK_PREFIXES = ('mmengine', 'mmcv', 'mmdet', 'mmpretrain', 'mmseg')
+
+
 def install_mock_modules():
     """Install mock modules so torch.load can unpickle mmengine checkpoints."""
-    prefixes = ['mmengine', 'mmcv', 'mmdet', 'mmpretrain', 'mmseg']
-    # Remove any previously registered real or mock versions
-    to_mock = [k for k in sys.modules if any(k == p or k.startswith(p + '.') for p in prefixes)]
-    for k in to_mock:
+    # Remove any previously registered real versions
+    to_remove = [k for k in sys.modules
+                 if any(k == p or k.startswith(p + '.') for p in _MOCK_PREFIXES)]
+    for k in to_remove:
         del sys.modules[k]
 
-    class MockFinder:
-        """A meta path finder that intercepts imports for mocked packages."""
+    class _MockFinder:
+        """Meta path finder that intercepts all imports for mocked packages."""
         def find_module(self, fullname, path=None):
-            if any(fullname == p or fullname.startswith(p + '.') for p in prefixes):
+            if any(fullname == p or fullname.startswith(p + '.')
+                   for p in _MOCK_PREFIXES):
                 return self
             return None
 
@@ -70,9 +86,8 @@ def install_mock_modules():
             sys.modules[fullname] = mod
             return mod
 
-    # Install the finder at the beginning of sys.meta_path
-    if not any(isinstance(f, MockFinder) for f in sys.meta_path):
-        sys.meta_path.insert(0, MockFinder())
+    if not any(isinstance(f, _MockFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _MockFinder())
 
 
 def build_key_mapping():
