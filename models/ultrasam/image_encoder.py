@@ -106,10 +106,10 @@ def add_decomposed_rel_pos(
     """Add decomposed relative positional embeddings to attention weights.
 
     Args:
-        attn: (B, q_H * q_W, k_H * k_W) attention map.
-        q: (B, q_H * q_W, C) query tensor.
-        rel_pos_h: (Lh, C) relative position embeddings for height axis.
-        rel_pos_w: (Lw, C) relative position embeddings for width axis.
+        attn: (B, nHeads, q_H * q_W, k_H * k_W) attention map.
+        q: (B, nHeads, q_H * q_W, head_dim) query tensor.
+        rel_pos_h: (Lh, head_dim) relative position embeddings for height axis.
+        rel_pos_w: (Lw, head_dim) relative position embeddings for width axis.
         q_size: (q_H, q_W) spatial size of query.
         k_size: (k_H, k_W) spatial size of key.
 
@@ -118,19 +118,17 @@ def add_decomposed_rel_pos(
     """
     q_h, q_w = q_size
     k_h, k_w = k_size
-    Rh = get_rel_pos(q_h, k_h, rel_pos_h)  # (q_h, k_h, C)
-    Rw = get_rel_pos(q_w, k_w, rel_pos_w)  # (q_w, k_w, C)
+    Rh = get_rel_pos(q_h, k_h, rel_pos_h)  # (q_h, k_h, head_dim)
+    Rw = get_rel_pos(q_w, k_w, rel_pos_w)  # (q_w, k_w, head_dim)
 
-    B, _, dim = q.shape
-    r_q = q.reshape(B, q_h, q_w, dim)
-    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)  # (B, q_h, q_w, k_h)
-    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)  # (B, q_h, q_w, k_w)
+    B, nHeads, _, dim = q.shape
+    r_q = q.reshape(B * nHeads, q_h, q_w, dim)
+    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)  # (B*nHeads, q_h, q_w, k_h)
+    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)  # (B*nHeads, q_h, q_w, k_w)
 
-    attn = (
-        attn.view(B, q_h, q_w, k_h, k_w)
-        + rel_h[:, :, :, :, None]
-        + rel_w[:, :, :, None, :]
-    ).view(B, q_h * q_w, k_h * k_w)
+    attn = attn.view(B * nHeads, q_h, q_w, k_h, k_w)
+    attn = attn + rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]
+    attn = attn.view(B, nHeads, q_h * q_w, k_h * k_w)
 
     return attn
 
