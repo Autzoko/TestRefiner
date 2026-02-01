@@ -15,21 +15,43 @@ import torch
 from collections import OrderedDict
 
 
+class _MockModule(types.ModuleType):
+    """A mock module that acts as a package and returns mock attributes."""
+    def __init__(self, name):
+        super().__init__(name)
+        self.__path__ = []  # Make it a package so submodules can be resolved
+        self.__package__ = name
+
+    def __getattr__(self, name):
+        # Return a dummy class for any attribute lookup (e.g., HistoryBuffer)
+        return type(name, (), {})
+
+
 def install_mock_modules():
     """Install mock modules so torch.load can unpickle mmengine checkpoints."""
-    mock_modules = [
-        'mmengine',
-        'mmengine.runner',
-        'mmengine.runner.checkpoint',
-        'mmengine.model',
-        'mmengine.model.base_module',
-        'mmengine.config',
-        'mmengine.logging',
-        'mmengine.registry',
-    ]
-    for mod_name in mock_modules:
-        if mod_name not in sys.modules:
-            sys.modules[mod_name] = types.ModuleType(mod_name)
+    prefixes = ['mmengine', 'mmcv', 'mmdet', 'mmpretrain', 'mmseg']
+    # Remove any previously registered real or mock versions
+    to_mock = [k for k in sys.modules if any(k == p or k.startswith(p + '.') for p in prefixes)]
+    for k in to_mock:
+        del sys.modules[k]
+
+    class MockFinder:
+        """A meta path finder that intercepts imports for mocked packages."""
+        def find_module(self, fullname, path=None):
+            if any(fullname == p or fullname.startswith(p + '.') for p in prefixes):
+                return self
+            return None
+
+        def load_module(self, fullname):
+            if fullname in sys.modules:
+                return sys.modules[fullname]
+            mod = _MockModule(fullname)
+            sys.modules[fullname] = mod
+            return mod
+
+    # Install the finder at the beginning of sys.meta_path
+    if not any(isinstance(f, MockFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, MockFinder())
 
 
 def build_key_mapping():
