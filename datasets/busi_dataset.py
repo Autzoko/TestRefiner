@@ -29,7 +29,16 @@ class BUSIDataset(Dataset):
                     base = os.path.splitext(f)[0]
                     # Find all corresponding masks
                     mask_paths = sorted(glob.glob(os.path.join(cat_dir, f"{base}_mask*.png")))
-                    if mask_paths:
+                    if not mask_paths:
+                        continue
+                    # Skip normal cases (empty masks)
+                    has_lesion = False
+                    for mp in mask_paths:
+                        m = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
+                        if m is not None and m.max() > 127:
+                            has_lesion = True
+                            break
+                    if has_lesion:
                         samples.append({'image': img_path, 'masks': mask_paths, 'name': f"{category}/{base}"})
 
         # K-fold split
