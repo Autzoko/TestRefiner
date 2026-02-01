@@ -156,20 +156,60 @@ def rescale_mask(mask_logits, pad_shape, img_shape, ori_shape):
 # Dataset helpers
 # ---------------------------------------------------------------------------
 
-def load_busi_samples(root_dir, split, fold, n_folds, seed=42):
-    """Load BUSI sample paths using the same splits as BUSIDataset."""
-    from datasets.busi_dataset import BUSIDataset
-    ds = BUSIDataset(root_dir, split=split, fold=fold, n_folds=n_folds,
-                     img_size=None, transform=None, seed=seed)
-    return ds.samples
+def load_all_busi_samples(root_dir):
+    """Load ALL BUSI samples (benign + malignant), skipping empty masks."""
+    import glob as glob_mod
+    samples = []
+    for category in ['benign', 'malignant']:
+        cat_dir = os.path.join(root_dir, category)
+        if not os.path.isdir(cat_dir):
+            continue
+        for f in sorted(os.listdir(cat_dir)):
+            if f.endswith('.png') and '_mask' not in f:
+                img_path = os.path.join(cat_dir, f)
+                base = os.path.splitext(f)[0]
+                mask_paths = sorted(glob_mod.glob(
+                    os.path.join(cat_dir, f"{base}_mask*.png")))
+                if not mask_paths:
+                    continue
+                has_lesion = False
+                for mp in mask_paths:
+                    m = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
+                    if m is not None and m.max() > 127:
+                        has_lesion = True
+                        break
+                if has_lesion:
+                    samples.append({
+                        'image': img_path,
+                        'masks': mask_paths,
+                        'name': f"{category}/{base}",
+                    })
+    return samples
 
 
-def load_samples_for_dataset(dataset_name, data_dir, split, fold, n_folds, seed=42):
+def load_samples_for_dataset(dataset_name, data_dir, split, fold, n_folds,
+                             use_all=False, seed=42):
     """Return list of {'image': path, 'masks': [paths], 'name': str}."""
+    if use_all:
+        if dataset_name == 'busi':
+            return load_all_busi_samples(data_dir)
+        else:
+            # For other datasets: union of train + val from fold 0
+            from datasets import get_dataset
+            ds_train = get_dataset(dataset_name, data_dir, split='train',
+                                   fold=0, n_folds=n_folds, img_size=None,
+                                   transform=None)
+            ds_val = get_dataset(dataset_name, data_dir, split='val',
+                                 fold=0, n_folds=n_folds, img_size=None,
+                                 transform=None)
+            return ds_train.samples + ds_val.samples
+
     if dataset_name == 'busi':
-        return load_busi_samples(data_dir, split, fold, n_folds, seed)
+        from datasets.busi_dataset import BUSIDataset
+        ds = BUSIDataset(data_dir, split=split, fold=fold, n_folds=n_folds,
+                         img_size=None, transform=None, seed=seed)
+        return ds.samples
     else:
-        # For other datasets, use get_dataset and access .samples
         from datasets import get_dataset
         ds = get_dataset(dataset_name, data_dir, split=split, fold=fold,
                          n_folds=n_folds, img_size=None, transform=None)
@@ -186,6 +226,8 @@ def get_args():
                    choices=['busi', 'busbra', 'bus'])
     p.add_argument('--data_dir', type=str, required=True)
     p.add_argument('--ultrasam_ckpt', type=str, required=True)
+    p.add_argument('--all', action='store_true',
+                   help='Run on ALL samples (ignore fold/split, use entire dataset)')
     p.add_argument('--fold', type=int, default=0)
     p.add_argument('--n_folds', type=int, default=5)
     p.add_argument('--split', type=str, default='val',
@@ -222,8 +264,10 @@ def run_inference(args):
     # Load dataset samples (paths only, no tensor conversion)
     samples = load_samples_for_dataset(
         args.dataset, args.data_dir, args.split, args.fold, args.n_folds,
+        use_all=args.all,
     )
-    print(f"  {len(samples)} {args.split} samples loaded")
+    label = "all" if args.all else f"{args.split} fold {args.fold}"
+    print(f"  {len(samples)} samples loaded ({label})")
 
     use_refinement = not args.no_refinement
     if use_refinement:
