@@ -9,8 +9,27 @@ Usage:
 
 import argparse
 import re
+import sys
+import types
 import torch
 from collections import OrderedDict
+
+
+def install_mock_modules():
+    """Install mock modules so torch.load can unpickle mmengine checkpoints."""
+    mock_modules = [
+        'mmengine',
+        'mmengine.runner',
+        'mmengine.runner.checkpoint',
+        'mmengine.model',
+        'mmengine.model.base_module',
+        'mmengine.config',
+        'mmengine.logging',
+        'mmengine.registry',
+    ]
+    for mod_name in mock_modules:
+        if mod_name not in sys.modules:
+            sys.modules[mod_name] = types.ModuleType(mod_name)
 
 
 def build_key_mapping():
@@ -68,6 +87,7 @@ def map_key(key, rules):
 def convert_checkpoint(input_path, output_path):
     """Load mmdet checkpoint and convert to standalone format."""
     print(f"Loading checkpoint: {input_path}")
+    install_mock_modules()
     ckpt = torch.load(input_path, map_location='cpu', weights_only=False)
 
     if 'state_dict' in ckpt:
@@ -132,7 +152,6 @@ def convert_checkpoint(input_path, output_path):
 
 def verify_against_model(state_dict):
     """Verify converted weights can be loaded into the standalone model."""
-    import sys
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
     from models.ultrasam import build_ultrasam_vit_b
