@@ -15,6 +15,28 @@ import torch
 from collections import OrderedDict
 
 
+class _MockObject:
+    """A universal mock that supports arbitrary attribute access, calls, and pickle."""
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __getattr__(self, name):
+        return _MockObject
+
+    def __call__(self, *args, **kwargs):
+        return _MockObject()
+
+    def __reduce__(self):
+        return (_MockObject, ())
+
+    def __reduce_ex__(self, protocol):
+        return (_MockObject, ())
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        return cls
+
+
 class _MockModule(types.ModuleType):
     """A mock module that acts as a package and returns mock attributes."""
     def __init__(self, name):
@@ -23,8 +45,7 @@ class _MockModule(types.ModuleType):
         self.__package__ = name
 
     def __getattr__(self, name):
-        # Return a dummy class for any attribute lookup (e.g., HistoryBuffer)
-        return type(name, (), {})
+        return _MockObject
 
 
 def install_mock_modules():
