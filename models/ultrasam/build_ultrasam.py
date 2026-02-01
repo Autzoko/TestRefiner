@@ -115,6 +115,7 @@ class UltraSAM(nn.Module):
         point_coords: Optional[torch.Tensor] = None,
         point_labels: Optional[torch.Tensor] = None,
         box_coords: Optional[torch.Tensor] = None,
+        mask_props: Optional[torch.Tensor] = None,
         multimask_output: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Simplified interface for the pipeline.
@@ -128,6 +129,7 @@ class UltraSAM(nn.Module):
             point_coords:     (B, N, 2) — point coordinates
             point_labels:     (B, N) — point labels (use 2 for positive)
             box_coords:       (B, 4) — box as (x1, y1, x2, y2)
+            mask_props:       (B, 1, 256, 256) — mask logits from previous pass (for refinement)
             multimask_output: if True return 3 masks, else 1
 
         Returns:
@@ -157,6 +159,7 @@ class UltraSAM(nn.Module):
             point_labels=point_labels,
             boxes=boxes,
             box_labels=box_labels,
+            mask_props=mask_props,
         )
         pts_embed = prompt_out["pts_embed"]
         dense_embed = prompt_out["dense_embed"]
@@ -195,8 +198,15 @@ def build_ultrasam_vit_b(
     out_chans: int = 256,
     window_size: int = 14,
     global_attn_indexes: Tuple[int, ...] = (2, 5, 8, 11),
+    use_mask_refinement: bool = True,
 ) -> UltraSAM:
-    """Build UltraSAM with ViT-B image encoder (default config)."""
+    """Build UltraSAM with ViT-B image encoder (default config).
+
+    Args:
+        use_mask_refinement: if True, prompt encoder includes mask_downscaling
+            layers for mask-prompt refinement (required for original UltraSAM
+            inference pipeline).
+    """
 
     image_encoder = ImageEncoderViT(
         img_size=img_size,
@@ -213,6 +223,7 @@ def build_ultrasam_vit_b(
         embed_dim=out_chans,
         image_embedding_size=(img_size // patch_size, img_size // patch_size),
         input_image_size=(img_size, img_size),
+        use_mask_refinement=use_mask_refinement,
     )
 
     transformer_decoder = SAMTransformerDecoder(

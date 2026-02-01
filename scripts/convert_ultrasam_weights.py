@@ -110,7 +110,8 @@ def build_key_mapping():
         (r'^backbone\.neck\.2\.(.*)', r'image_encoder.neck.2.\1'),
         (r'^backbone\.neck\.3\.(.*)', r'image_encoder.neck.3.\1'),
 
-        # Prompt encoder
+        # Prompt encoder (label_encoder.label_embedding -> label_encoder)
+        (r'^prompt_encoder\.label_encoder\.label_embedding\.(.*)', r'prompt_encoder.label_encoder.\1'),
         (r'^prompt_encoder\.(.*)', r'prompt_encoder.\1'),
 
         # Transformer decoder
