@@ -80,7 +80,7 @@ pip install ml-collections
 echo ""
 echo "=== [4/5] Installing pipeline dependencies ==="
 pip install \
-    numpy \
+    "numpy<2.0" \
     scipy \
     scikit-learn \
     scikit-image \

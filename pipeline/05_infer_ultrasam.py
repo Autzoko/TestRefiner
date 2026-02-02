@@ -97,7 +97,9 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device, targe
 
     # Convert to tensor (C, H, W), normalized
     img_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-    img_tensor = torch.from_numpy(img_rgb.astype(np.float32).transpose(2, 0, 1))
+    img_tensor = torch.tensor(
+        img_rgb.astype(np.float32).transpose(2, 0, 1).copy()
+    )
 
     # Normalize with ImageNet stats
     mean = torch.tensor([123.675, 116.28, 103.53]).view(3, 1, 1)
@@ -151,15 +153,18 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device, targe
         result = results
 
     # Try to get mask from pred_instances
+    # Use np.array() instead of .numpy() to avoid torch-numpy bridge issues
     if hasattr(result, "pred_instances") and hasattr(result.pred_instances, "masks"):
         mask_pred = result.pred_instances.masks[0]
         if isinstance(mask_pred, torch.Tensor):
-            mask_pred = mask_pred.cpu().numpy()
+            mask_pred = np.array(mask_pred.cpu().detach(), dtype=np.uint8)
     elif hasattr(result, "pred_instances") and hasattr(result.pred_instances, "mask_logits"):
         logits = result.pred_instances.mask_logits[0]
         if isinstance(logits, torch.Tensor):
-            logits = logits.cpu().numpy()
-        mask_pred = (logits > 0).astype(np.uint8)
+            logits_np = np.array(logits.cpu().detach(), dtype=np.float32)
+        else:
+            logits_np = np.array(logits, dtype=np.float32)
+        mask_pred = (logits_np > 0).astype(np.uint8)
         if mask_pred.ndim == 3:
             mask_pred = mask_pred[0]
     else:
