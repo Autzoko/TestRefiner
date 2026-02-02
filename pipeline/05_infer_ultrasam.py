@@ -108,28 +108,42 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device, targe
     img_tensor = img_tensor.unsqueeze(0).to(device)
 
     # Build data sample with prompts
+    # UltraSAM expects: points (N, num_pts, 2), boxes (N, 2, 2) as [[x1,y1],[x2,y2]],
+    # prompt_types (N,) where 0=POINT, 1=BOX. All attributes must be present.
     data_sample = DetDataSample()
     gt_instances = InstanceData()
 
-    if prompt_type in ("box", "both"):
+    if prompt_type == "box":
         box = prompts["box"]
         box_1024 = transform_coords(box, (orig_h, orig_w), target_size, is_box=True)
-        gt_instances.bboxes = torch.tensor([box_1024], dtype=torch.float32).to(device)
-        gt_instances.bp_type = torch.tensor([0]).to(device)  # 0 = box prompt
+        x1, y1, x2, y2 = box_1024
+        # boxes: (N, 2, 2) as [[x1,y1],[x2,y2]]
+        gt_instances.boxes = torch.tensor([[[x1, y1], [x2, y2]]], dtype=torch.float32).to(device)
+        # points: must exist but use box center as the point
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        gt_instances.points = torch.tensor([[[cx, cy]]], dtype=torch.float32).to(device)
+        gt_instances.point_labels = torch.tensor([[1]], dtype=torch.int64).to(device)
+        gt_instances.prompt_types = torch.tensor([1], dtype=torch.long).to(device)  # 1=BOX
 
-    if prompt_type in ("point", "both"):
+    elif prompt_type == "point":
         point = prompts["point"]
         point_1024 = transform_coords(point, (orig_h, orig_w), target_size, is_box=False)
-        point_tensor = torch.tensor([[point_1024]], dtype=torch.float32).to(device)
-        label_tensor = torch.tensor([[1]], dtype=torch.int64).to(device)
-        if hasattr(gt_instances, "bboxes"):
-            # Both mode: attach point info alongside box
-            gt_instances.points = point_tensor
-            gt_instances.point_labels = label_tensor
-        else:
-            gt_instances.points = point_tensor
-            gt_instances.point_labels = label_tensor
-            gt_instances.bp_type = torch.tensor([1]).to(device)  # 1 = point prompt
+        gt_instances.points = torch.tensor([[point_1024]], dtype=torch.float32).to(device)
+        gt_instances.point_labels = torch.tensor([[1]], dtype=torch.int64).to(device)
+        # boxes: must exist, use full-image box as placeholder
+        gt_instances.boxes = torch.tensor([[[0, 0], [target_size, target_size]]], dtype=torch.float32).to(device)
+        gt_instances.prompt_types = torch.tensor([0], dtype=torch.long).to(device)  # 0=POINT
+
+    elif prompt_type == "both":
+        box = prompts["box"]
+        box_1024 = transform_coords(box, (orig_h, orig_w), target_size, is_box=True)
+        x1, y1, x2, y2 = box_1024
+        point = prompts["point"]
+        point_1024 = transform_coords(point, (orig_h, orig_w), target_size, is_box=False)
+        gt_instances.boxes = torch.tensor([[[x1, y1], [x2, y2]]], dtype=torch.float32).to(device)
+        gt_instances.points = torch.tensor([[point_1024]], dtype=torch.float32).to(device)
+        gt_instances.point_labels = torch.tensor([[1]], dtype=torch.int64).to(device)
+        gt_instances.prompt_types = torch.tensor([1], dtype=torch.long).to(device)  # 1=BOX (use box refinement)
 
     data_sample.gt_instances = gt_instances
 
