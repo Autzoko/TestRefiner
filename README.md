@@ -174,7 +174,7 @@ All coordinates are in original pixel space. Transformation to UltraSAM's 1024x1
 ### 6. UltraSAM Inference
 
 ```bash
-# Box prompt only
+# Box prompt only (full image)
 python pipeline/05_infer_ultrasam.py \
     --prompt_dir outputs/prompts/busi \
     --image_dir outputs/preprocessed/busi/images_fullres \
@@ -191,14 +191,38 @@ python pipeline/05_infer_ultrasam.py \
 # Both prompts (two instances: one POINT + one BOX, merged via OR)
 python pipeline/05_infer_ultrasam.py \
     ... --prompt_type both --output_dir outputs/ultrasam_preds/busi_both
+
+# Crop mode: crop image around prediction bbox, then run inference on the crop
+python pipeline/05_infer_ultrasam.py \
+    --prompt_dir outputs/prompts/busi \
+    --image_dir outputs/preprocessed/busi/images_fullres \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/ultrasam_preds/busi_crop \
+    --prompt_type box \
+    --crop --crop_expand 0.5 \
+    --device cuda:0
 ```
 
-Prompt modes:
+**Prompt modes:**
+
 | Mode | Behavior |
 |------|----------|
 | `box` | Single instance with BOX prompt type; box center used as required point placeholder |
 | `point` | Single instance with POINT prompt type; full-image box as required box placeholder |
 | `both` | Two instances sent to UltraSAM: one POINT + one BOX; output masks merged with logical OR |
+
+**Crop mode (`--crop`):**
+
+Instead of feeding the full image to UltraSAM, crops a region around TransUNet's predicted bounding box and feeds only the crop. This gives UltraSAM higher effective resolution on the region of interest. The `--crop_expand` ratio (default 0.5) controls how much context beyond the prompt box is included — e.g. 0.5 adds 50% of the box width/height on each side. Crop mode can be combined with any `--prompt_type`.
+
+Coordinate transform chain in crop mode:
+```
+Original pixel space  ──(subtract crop origin)──►  Crop space  ──(scale to 1024)──►  UltraSAM
+UltraSAM output mask  ──(SAMHead rescales to crop size)──►  Paste back into full image
+```
+
+`--crop_expand` is independent from `--box_expand` (used in step 5): `box_expand` controls how loose the prompt box given to UltraSAM is; `crop_expand` controls how much surrounding image context the model sees.
 
 ### 7. Compare Results
 
@@ -224,6 +248,7 @@ python pipeline/06_compare.py \
 - **Deterministic splits**: `KFold(shuffle=True, random_state=123)` ensures reproducibility across runs.
 - **UltraSAM via mmengine**: Direct `model.predict()` calls with manual module registration and MonkeyPatch application, giving full control over prompt injection.
 - **Box expansion**: Optional `--box_expand` ratio loosens the tight bounding box, which can help UltraSAM when TransUNet predictions are slightly misaligned.
+- **Crop mode**: Optional `--crop` feeds only the region around the prediction to UltraSAM at higher effective resolution. Prompts are transformed from original space to crop space before being scaled to 1024-space. The output mask is pasted back into a full-size canvas.
 
 ## Requirements
 
