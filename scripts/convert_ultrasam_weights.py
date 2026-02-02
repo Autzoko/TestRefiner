@@ -93,7 +93,9 @@ def install_mock_modules():
 def build_key_mapping():
     """Define the key mapping rules from mmdet to standalone."""
     rules = [
+        # ==================================================================
         # Image encoder (backbone)
+        # ==================================================================
         (r'^backbone\.patch_embed\.projection\.(.*)', r'image_encoder.patch_embed.proj.\1'),
         (r'^backbone\.pos_embed', r'image_encoder.pos_embed'),
         (r'^backbone\.layers\.(\d+)\.ln1\.(.*)', r'image_encoder.blocks.\1.norm1.\2'),
@@ -104,29 +106,59 @@ def build_key_mapping():
         (r'^backbone\.layers\.(\d+)\.attn\.rel_pos_w', r'image_encoder.blocks.\1.attn.rel_pos_w'),
         (r'^backbone\.layers\.(\d+)\.ffn\.layers\.0\.0\.(.*)', r'image_encoder.blocks.\1.mlp.lin1.\2'),
         (r'^backbone\.layers\.(\d+)\.ffn\.layers\.1\.(.*)', r'image_encoder.blocks.\1.mlp.lin2.\2'),
-        # Neck
-        (r'^backbone\.neck\.0\.(.*)', r'image_encoder.neck.0.\1'),
-        (r'^backbone\.neck\.1\.(.*)', r'image_encoder.neck.1.\1'),
-        (r'^backbone\.neck\.2\.(.*)', r'image_encoder.neck.2.\1'),
-        (r'^backbone\.neck\.3\.(.*)', r'image_encoder.neck.3.\1'),
+        # Neck (try both naming conventions used by mmpretrain ViTSAM)
+        (r'^backbone\.neck\.(\d+)\.(.*)', r'image_encoder.neck.\1.\2'),
+        (r'^backbone\.channel_reduction\.(\d+)\.(.*)', r'image_encoder.neck.\1.\2'),
 
-        # Prompt encoder (label_encoder.label_embedding -> label_encoder)
+        # ==================================================================
+        # Prompt encoder
+        # ==================================================================
         (r'^prompt_encoder\.label_encoder\.label_embedding\.(.*)', r'prompt_encoder.label_encoder.\1'),
         (r'^prompt_encoder\.(.*)', r'prompt_encoder.\1'),
 
-        # Transformer decoder
-        (r'^decoder\.layers\.(\d+)\.self_attn\.(.*)', r'transformer_decoder.layers.\1.self_attn.\2'),
-        (r'^decoder\.layers\.(\d+)\.cross_attn_token_to_image\.(.*)', r'transformer_decoder.layers.\1.cross_attn_token_to_image.\2'),
-        (r'^decoder\.layers\.(\d+)\.cross_attn_image_to_token\.(.*)', r'transformer_decoder.layers.\1.cross_attn_image_to_token.\2'),
-        (r'^decoder\.layers\.(\d+)\.mlp\.(.*)', r'transformer_decoder.layers.\1.mlp.\2'),
-        (r'^decoder\.layers\.(\d+)\.norm1\.(.*)', r'transformer_decoder.layers.\1.norm1.\2'),
-        (r'^decoder\.layers\.(\d+)\.norm2\.(.*)', r'transformer_decoder.layers.\1.norm2.\2'),
-        (r'^decoder\.layers\.(\d+)\.norm3\.(.*)', r'transformer_decoder.layers.\1.norm3.\2'),
-        (r'^decoder\.layers\.(\d+)\.norm4\.(.*)', r'transformer_decoder.layers.\1.norm4.\2'),
-        (r'^decoder\.final_attn_token_to_image\.(.*)', r'transformer_decoder.final_attn_token_to_image.\1'),
+        # ==================================================================
+        # Transformer decoder — attention modules
+        # mmcv MultiheadAttention stores weights as raw Parameters:
+        #   attn.q_proj_weight, attn.k_proj_weight, attn.v_proj_weight
+        #   attn.in_proj_bias  (fused, split later)
+        #   attn.out_proj.weight, attn.out_proj.bias
+        # Our standalone uses nn.Linear:
+        #   q_proj.weight/bias, k_proj.weight/bias, v_proj.weight/bias
+        #   out_proj.weight/bias
+        # ==================================================================
+        # Layer attention — q/k/v projection weights
+        (r'^decoder\.layers\.(\d+)\.(self_attn|cross_attn_token_to_image|cross_attn_image_to_token)\.attn\.(q|k|v)_proj_weight',
+         r'transformer_decoder.layers.\1.\2.\3_proj.weight'),
+        # Layer attention — out_proj
+        (r'^decoder\.layers\.(\d+)\.(self_attn|cross_attn_token_to_image|cross_attn_image_to_token)\.attn\.out_proj\.(.*)',
+         r'transformer_decoder.layers.\1.\2.out_proj.\3'),
+        # Layer attention — in_proj_bias handled in post-processing (needs split)
+
+        # Final attention — q/k/v projection weights
+        (r'^decoder\.final_attn_token_to_image\.attn\.(q|k|v)_proj_weight',
+         r'transformer_decoder.final_attn_token_to_image.\1_proj.weight'),
+        # Final attention — out_proj
+        (r'^decoder\.final_attn_token_to_image\.attn\.out_proj\.(.*)',
+         r'transformer_decoder.final_attn_token_to_image.out_proj.\1'),
+        # Final attention — in_proj_bias handled in post-processing
+
+        # ==================================================================
+        # Transformer decoder — MLP (mmcv FFN: layers.0.0.* -> layers.0.*)
+        # ==================================================================
+        (r'^decoder\.layers\.(\d+)\.mlp\.layers\.0\.0\.(.*)',
+         r'transformer_decoder.layers.\1.mlp.layers.0.\2'),
+        (r'^decoder\.layers\.(\d+)\.mlp\.layers\.1\.(.*)',
+         r'transformer_decoder.layers.\1.mlp.layers.1.\2'),
+
+        # ==================================================================
+        # Transformer decoder — norms, post_norm
+        # ==================================================================
+        (r'^decoder\.layers\.(\d+)\.norm(\d+)\.(.*)', r'transformer_decoder.layers.\1.norm\2.\3'),
         (r'^decoder\.post_norm\.(.*)', r'transformer_decoder.post_norm.\1'),
 
+        # ==================================================================
         # Mask decoder (bbox_head)
+        # ==================================================================
         (r'^bbox_head\.output_upscaling\.(.*)', r'mask_decoder.output_upscaling.\1'),
         (r'^bbox_head\.output_hypernetworks_mlps\.(.*)', r'mask_decoder.output_hypernetworks_mlps.\1'),
         (r'^bbox_head\.iou_prediction_head\.(.*)', r'mask_decoder.iou_prediction_head.\1'),
@@ -174,7 +206,7 @@ def convert_checkpoint(input_path, output_path):
             unmapped.append(key)
 
     # Second pass: strip 'sam.' prefix for unmapped keys
-    still_unmapped = []
+    remaining = []
     for key in unmapped:
         if key.startswith('sam.'):
             stripped = key[4:]
@@ -182,6 +214,29 @@ def convert_checkpoint(input_path, output_path):
             if new_key is not None:
                 new_state[new_key] = src_state[key]
                 mapped_count += 1
+                continue
+        remaining.append(key)
+
+    # Third pass: handle in_proj_bias (fused q+k+v bias → split into 3)
+    still_unmapped = []
+    for key in remaining:
+        # Match both with and without 'sam.' prefix
+        raw_key = key[4:] if key.startswith('sam.') else key
+        if raw_key.endswith('.attn.in_proj_bias'):
+            bias = src_state[key]
+            dim = bias.shape[0] // 3
+            # Derive the destination prefix by replacing the suffix
+            # e.g. decoder.layers.0.self_attn.attn.in_proj_bias
+            #   -> transformer_decoder.layers.0.self_attn  (prefix)
+            probe_key = raw_key.replace('.attn.in_proj_bias', '.attn.q_proj_weight')
+            dst_probe = map_key(probe_key, rules)
+            if dst_probe is not None:
+                prefix = dst_probe.rsplit('.q_proj.weight', 1)[0]
+                new_state[f'{prefix}.q_proj.bias'] = bias[:dim]
+                new_state[f'{prefix}.k_proj.bias'] = bias[dim:2*dim]
+                new_state[f'{prefix}.v_proj.bias'] = bias[2*dim:]
+                mapped_count += 1  # count as 1 source key -> 3 dest keys
+                print(f"  Split in_proj_bias: {key} -> {prefix}.{{q,k,v}}_proj.bias ({dim})")
                 continue
         still_unmapped.append(key)
 
