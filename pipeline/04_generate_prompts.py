@@ -4,6 +4,12 @@ Usage:
     python pipeline/04_generate_prompts.py \
         --pred_dir outputs/transunet_preds/busi \
         --output_dir outputs/prompts/busi
+
+    # Expand bounding box by 20% on each side:
+    python pipeline/04_generate_prompts.py \
+        --pred_dir outputs/transunet_preds/busi \
+        --output_dir outputs/prompts/busi \
+        --box_expand 0.2
 """
 
 import argparse
@@ -28,7 +34,13 @@ def main():
                         help="TransUNet prediction directory (contains fold_*/)")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory for prompt JSON files")
+    parser.add_argument("--box_expand", type=float, default=0.0,
+                        help="Expand bounding box by this ratio on each side "
+                             "(e.g. 0.2 = 20%% of box width/height added per side)")
     args = parser.parse_args()
+
+    if args.box_expand > 0:
+        print(f"Box expand ratio: {args.box_expand}")
 
     fold_dirs = sorted(glob(os.path.join(args.pred_dir, "fold_*")))
     if not fold_dirs:
@@ -54,7 +66,7 @@ def main():
             h, w = binary.shape
 
             # Extract prompts
-            bbox = mask_to_bbox(binary)
+            bbox = mask_to_bbox(binary, expand_ratio=args.box_expand)
             centroid = mask_to_centroid(binary)
 
             # Fallback for empty predictions
@@ -66,6 +78,7 @@ def main():
                 "image_size": [h, w],
                 "box": bbox,
                 "point": centroid,
+                "box_expand_ratio": args.box_expand,
                 "empty_prediction": not binary.any(),
             }
 

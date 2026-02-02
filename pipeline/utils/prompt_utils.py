@@ -5,19 +5,40 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 
-def mask_to_bbox(mask: np.ndarray) -> Optional[List[int]]:
-    """Extract tight bounding box [x1, y1, x2, y2] from binary mask.
+def mask_to_bbox(
+    mask: np.ndarray, expand_ratio: float = 0.0
+) -> Optional[List[int]]:
+    """Extract bounding box [x1, y1, x2, y2] from binary mask.
 
-    Returns None if mask is empty.
+    Args:
+        mask: Binary mask (H, W).
+        expand_ratio: Expand the tight box by this fraction of its width/height
+            on each side. E.g. 0.1 adds 10% of box width to left and right,
+            10% of box height to top and bottom. Clamped to image bounds.
+
+    Returns:
+        [x1, y1, x2, y2] or None if mask is empty.
     """
     mask = mask.astype(bool)
     if not mask.any():
         return None
+    h, w = mask.shape[:2]
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     y1, y2 = np.where(rows)[0][[0, -1]]
     x1, x2 = np.where(cols)[0][[0, -1]]
-    return [int(x1), int(y1), int(x2), int(y2)]
+
+    if expand_ratio > 0:
+        bw = x2 - x1
+        bh = y2 - y1
+        dx = bw * expand_ratio
+        dy = bh * expand_ratio
+        x1 = max(0, x1 - dx)
+        y1 = max(0, y1 - dy)
+        x2 = min(w - 1, x2 + dx)
+        y2 = min(h - 1, y2 + dy)
+
+    return [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))]
 
 
 def mask_to_centroid(mask: np.ndarray) -> List[int]:
