@@ -95,7 +95,7 @@ def preprocess_image(image_bgr, target_size=1024):
     """Resize image to target_size (aspect-ratio preserving, zero-padded).
 
     Returns:
-        padded: (target_size, target_size, 3) uint8 RGB
+        padded_bgr: (target_size, target_size, 3) uint8 BGR
         scale: scaling factor applied
         new_h, new_w: actual content dimensions within the padded image
     """
@@ -106,9 +106,8 @@ def preprocess_image(image_bgr, target_size=1024):
 
     padded = np.zeros((target_size, target_size, 3), dtype=np.uint8)
     padded[:new_h, :new_w] = resized
-    # Convert BGR to RGB
-    padded_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-    return padded_rgb, scale, new_h, new_w
+    # Keep BGR — DetDataPreprocessor expects BGR and converts to RGB internally
+    return padded, scale, new_h, new_w
 
 
 def build_data_sample(prompts, prompt_type, orig_h, orig_w, new_h, new_w,
@@ -202,14 +201,13 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device,
     Returns: binary mask (np.uint8) at original resolution.
     """
     orig_h, orig_w = image_bgr.shape[:2]
-    padded_rgb, scale, new_h, new_w = preprocess_image(image_bgr, target_size)
+    padded_bgr, scale, new_h, new_w = preprocess_image(image_bgr, target_size)
 
-    # Build image tensor: (1, 3, H, W) float32 — raw pixel values.
-    # DetDataPreprocessor inside model.predict() handles normalization.
+    # Build image tensor: (3, H, W) uint8 BGR — raw pixel values.
+    # DetDataPreprocessor will handle BGR→RGB conversion and normalization.
     img_tensor = torch.tensor(
-        padded_rgb.astype(np.float32).transpose(2, 0, 1).copy(),
-        device=device,
-    ).unsqueeze(0)
+        padded_bgr.astype(np.float32).transpose(2, 0, 1).copy(),
+    )
 
     # Build data sample with prompts
     data_sample = build_data_sample(
@@ -217,9 +215,14 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device,
         scale, target_size, device,
     )
 
-    # Run model — model.predict() wraps with data_preprocessor + SAM.predict()
+    # Run through data_preprocessor then model.predict().
+    # model.predict() is a direct call that does NOT invoke the data
+    # preprocessor, so we must call it explicitly. The preprocessor
+    # handles BGR→RGB conversion, ImageNet normalization, and padding.
     with torch.no_grad():
-        results = model.predict(img_tensor, [data_sample])
+        data = {"inputs": [img_tensor], "data_samples": [data_sample]}
+        data = model.data_preprocessor(data, False)
+        results = model(**data, mode="predict")
 
     # Extract mask from results
     result = results[0] if isinstance(results, list) else results
