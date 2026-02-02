@@ -1,483 +1,147 @@
 # UltraRefiner
 
-Two-phase ultrasound image segmentation pipeline:
+A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation datasets (BUSI, BUSBRA, etc.), then uses the predictions as prompts to drive **UltraSAM** inference — comparing both methods on Dice, IoU, and HD95.
 
-1. **Phase 1 (TransUNet)**: Train a coarse segmentation model on ultrasound datasets
-2. **Phase 2 (UltraSAM)**: Refine predictions by cropping around the coarse mask, generating point/box prompts, and feeding into UltraSAM
+## Pipeline Overview
 
-UltraSAM is re-implemented as standalone PyTorch with no mmdet/mmcv dependencies.
+| Step | Script | Description |
+|------|--------|-------------|
+| 0 | `pipeline/00_setup.sh` | Clone TransUNet & UltraSAM repos, download pretrained weights |
+| 1 | `pipeline/01_preprocess.py` | Convert raw PNG datasets to `.npz` format |
+| 2 | `pipeline/02_train_transunet.py` | Train TransUNet with 5-fold cross-validation |
+| 3 | `pipeline/03_infer_transunet.py` | Run TransUNet inference on all validation folds |
+| 4 | `pipeline/04_generate_prompts.py` | Extract bounding-box / point prompts from predictions |
+| 5 | `pipeline/05_infer_ultrasam.py` | Run frozen UltraSAM with generated prompts |
+| 6 | `pipeline/06_compare.py` | Compare metrics and optionally visualize results |
 
-## Project Structure
+## Directory Structure
 
 ```
 UltraRefiner/
-├── models/
-│   ├── transunet/                  # R50-ViT-B/16 + UNet decoder
-│   │   ├── vit_seg_modeling.py
-│   │   ├── vit_seg_modeling_resnet_skip.py
-│   │   └── vit_seg_configs.py
-│   └── ultrasam/                   # Standalone SAM-based model
-│       ├── image_encoder.py        # ViT-B (1024x1024 -> 256x64x64)
-│       ├── prompt_encoder.py       # Point/box prompt encoding
-│       ├── transformer.py          # Two-way cross-attention decoder
-│       ├── mask_decoder.py         # Mask prediction + IoU head
-│       ├── common.py               # LayerNorm2d, MLP, positional encoding
-│       └── build_ultrasam.py       # Top-level model + factory
-├── datasets/
-│   ├── busi_dataset.py             # BUSI loader
-│   ├── busbra_dataset.py           # BUSBRA loader
-│   ├── bus_dataset.py              # BUS loader
-│   └── transforms.py               # Augmentations
-├── utils/
-│   ├── losses.py                   # CE+Dice, Focal+Dice+IoU losses
-│   ├── metrics.py                  # Dice, IoU, HD95
-│   └── crop_utils.py               # Cropping, prompts, coordinate transforms
-├── scripts/
-│   ├── download_weights.sh         # Download pretrained weights
-│   └── convert_ultrasam_weights.py # mmdet -> standalone weight conversion
-├── train_transunet.py              # Phase 1 training
-├── train_ultrasam.py               # Phase 2 training / evaluation
-├── inference.py                    # Full pipeline inference
-└── requirements.txt
+├── pipeline/
+│   ├── 00_setup.sh
+│   ├── 01_preprocess.py
+│   ├── 02_train_transunet.py
+│   ├── 03_infer_transunet.py
+│   ├── 04_generate_prompts.py
+│   ├── 05_infer_ultrasam.py
+│   ├── 06_compare.py
+│   └── utils/
+│       ├── metrics.py          # Dice, IoU, HD95
+│       ├── prompt_utils.py     # mask → bbox / centroid, coordinate transforms
+│       └── vis_utils.py        # 4-panel comparison figures
+├── TransUNet/                  # cloned at setup (git-ignored)
+├── UltraSam/                   # cloned at setup (git-ignored)
+└── outputs/                    # all runtime outputs (git-ignored)
 ```
 
-## 0. Environment Setup
+## Quick Start
+
+### 1. Setup
 
 ```bash
-# Create conda environment (recommended)
-conda create -n ultrarefiner python=3.10 -y
-conda activate ultrarefiner
-
-# Install PyTorch (adjust CUDA version as needed)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-# Install remaining dependencies
-pip install -r requirements.txt
+bash pipeline/00_setup.sh
 ```
 
-**Requirements**: Python 3.8+, PyTorch >= 1.13, CUDA GPU recommended.
+This clones both repositories and downloads the R50+ViT-B_16 pretrained encoder. You will need to manually download `UltraSam.pth` from the [UltraSam releases](https://github.com/CAMMA-public/UltraSam#pretrained-models) and place it at `UltraSam/weights/UltraSam.pth`.
 
-## 1. Data Preparation
-
-### 1.1 BUSI (Breast Ultrasound Images Dataset)
-
-Download from: https://scholar.cu.edu.eg/?q=afahmy/pages/dataset
-
-Expected directory structure:
-
-```
-/path/to/BUSI/
-├── benign/
-│   ├── benign (1).png
-│   ├── benign (1)_mask.png
-│   ├── benign (2).png
-│   ├── benign (2)_mask.png
-│   └── ...
-└── malignant/
-    ├── malignant (1).png
-    ├── malignant (1)_mask.png
-    └── ...
-```
-
-- Images are RGB `.png` files
-- Masks follow the naming pattern `<name>_mask.png` (or `<name>_mask_1.png` for multiple masks)
-- Multiple masks per image are OR-merged automatically
-- The `normal/` category (no lesions) is excluded
-
-### 1.2 BUSBRA (Brazilian Breast Ultrasound Dataset)
-
-Expected directory structure:
-
-```
-/path/to/BUSBRA/
-├── Images/
-│   ├── bus_0001-l.png
-│   ├── bus_0001-r.png
-│   └── ...
-├── Masks/
-│   ├── mask_0001-l.png
-│   ├── mask_0001-r.png
-│   └── ...
-└── 5-fold-cv.csv          # (optional) predefined fold assignments
-```
-
-- Image `bus_XXXX-X.png` maps to mask `mask_XXXX-X.png`
-- If `5-fold-cv.csv` is present, it is used for fold splits; otherwise K-fold is applied
-
-### 1.3 BUS (Breast Ultrasound Dataset)
-
-Expected directory structure:
-
-```
-/path/to/BUS/
-├── original/
-│   ├── 000001.png
-│   ├── 000002.png
-│   └── ...
-└── GT/
-    ├── 000001.png
-    ├── 000002.png
-    └── ...
-```
-
-- Image filenames in `original/` are matched to the same filename in `GT/`
-- Extension fallback is supported (`.png`, `.jpg`, `.bmp`)
-
-### 1.4 No Preprocessing Required
-
-The dataset loaders handle all preprocessing internally:
-- Images are loaded as RGB and normalized to `[0, 1]`
-- Masks are binarized at threshold 127
-- Resizing to the target size (224x224 for TransUNet, 1024x1024 for UltraSAM) is done automatically
-- K-fold cross-validation splitting is built into the dataset classes
-
-## 2. Download Pretrained Weights
+### 2. Preprocess
 
 ```bash
-# Download TransUNet ViT weights + instructions for UltraSAM
-bash scripts/download_weights.sh
-```
-
-This script:
-1. Downloads `R50+ViT-B_16.npz` (ImageNet-21k pretrained) into `weights/`
-2. Prompts you to manually download `UltraSam.pth` from the [UltraSam repo](https://github.com/CAMMA-public/UltraSam)
-
-After placing `UltraSam.pth` in `weights/`, convert it to standalone format:
-
-```bash
-python scripts/convert_ultrasam_weights.py \
-    --input weights/UltraSam.pth \
-    --output weights/ultrasam_standalone.pth \
-    --verify
-```
-
-The `--verify` flag checks that all converted keys match the standalone model architecture.
-
-After this step, `weights/` should contain:
-
-```
-weights/
-├── R50+ViT-B_16.npz           # TransUNet pretrained backbone
-├── UltraSam.pth                # Original mmdet checkpoint
-└── ultrasam_standalone.pth     # Converted standalone weights
-```
-
-## 3. Phase 1: Train TransUNet
-
-TransUNet is trained as a 2-class segmentation model (background + lesion) at 224x224 resolution.
-
-### 3.1 Basic Training
-
-```bash
-python train_transunet.py \
+# BUSI dataset
+python pipeline/01_preprocess.py \
     --dataset busi \
-    --data_dir /path/to/BUSI \
-    --fold 0 \
-    --n_folds 5 \
-    --pretrained_path weights/R50+ViT-B_16.npz \
-    --output_dir output/transunet
+    --data_dir /path/to/Dataset_BUSI_with_GT \
+    --output_dir outputs/preprocessed/busi
+
+# BUSBRA dataset
+python pipeline/01_preprocess.py \
+    --dataset busbra \
+    --data_dir /path/to/BUSBRA \
+    --output_dir outputs/preprocessed/busbra
 ```
 
-### 3.2 Full Argument Reference
-
-| Argument | Default | Description |
-|---|---|---|
-| `--dataset` | `busi` | Dataset name: `busi`, `busbra`, or `bus` |
-| `--data_dir` | (required) | Path to dataset root directory |
-| `--fold` | `0` | K-fold index (0 to n_folds-1) |
-| `--n_folds` | `5` | Number of cross-validation folds |
-| `--img_size` | `224` | Input image size |
-| `--num_classes` | `2` | Number of segmentation classes |
-| `--vit_name` | `R50-ViT-B_16` | ViT backbone variant |
-| `--n_skip` | `3` | Number of skip connections |
-| `--pretrained_path` | `None` | Path to `.npz` pretrained ViT weights |
-| `--max_epoch` | `1000` | Total training epochs |
-| `--batch_size` | `4` | Training batch size |
-| `--base_lr` | `0.01` | Initial learning rate |
-| `--weight_decay` | `1e-4` | L2 regularization |
-| `--momentum` | `0.9` | SGD momentum |
-| `--val_every` | `5` | Validate every N epochs |
-| `--num_workers` | `4` | DataLoader workers |
-| `--seed` | `123` | Random seed |
-| `--output_dir` | `output/transunet` | Output directory |
-
-### 3.3 Training Details
-
-- **Optimizer**: SGD (momentum=0.9, weight_decay=1e-4)
-- **Loss**: 0.5 * CrossEntropy + 0.5 * Dice
-- **LR schedule**: Polynomial decay `lr = base_lr * (1 - iter/max_iter)^0.9`
-- **Augmentation**: Random horizontal flip (p=0.5) + random rotation up to 20 degrees (p=0.5)
-- **Validation metrics**: Dice, IoU, HD95 (95th percentile Hausdorff distance)
-
-### 3.4 Output Structure
-
-```
-output/transunet/busi/fold_0/
-├── model/
-│   ├── best.pth        # Best model by validation Dice
-│   ├── epoch_100.pth   # Periodic checkpoints every 100 epochs
-│   └── final.pth       # Final epoch model
-├── tb_logs/            # TensorBoard logs
-└── train.log           # Training log
-```
-
-Monitor training with TensorBoard:
+### 3. Train TransUNet (5-fold CV)
 
 ```bash
-tensorboard --logdir output/transunet/busi/fold_0/tb_logs
+# All 5 folds
+python pipeline/02_train_transunet.py \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/transunet_models/busi \
+    --n_folds 5 --max_epochs 1000 --batch_size 4 --base_lr 0.01 \
+    --device cuda:0
+
+# Single fold (for testing)
+python pipeline/02_train_transunet.py \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/transunet_models/busi \
+    --fold 0 --max_epochs 5 --device cuda:0
 ```
 
-### 3.5 Train All Folds
+### 4. TransUNet Inference
 
 ```bash
-for fold in 0 1 2 3 4; do
-    python train_transunet.py \
-        --dataset busi \
-        --data_dir /path/to/BUSI \
-        --fold $fold \
-        --pretrained_path weights/R50+ViT-B_16.npz \
-        --output_dir output/transunet
-done
+python pipeline/03_infer_transunet.py \
+    --data_dir outputs/preprocessed/busi \
+    --model_dir outputs/transunet_models/busi \
+    --output_dir outputs/transunet_preds/busi \
+    --device cuda:0
 ```
 
-## 4. Phase 2: UltraSAM Refinement
-
-Phase 2 uses the trained TransUNet to generate coarse predictions, then crops the image around the prediction, generates point/box prompts, and feeds everything into UltraSAM.
-
-### 4.1 Evaluation Only (Frozen UltraSAM)
-
-Use pretrained UltraSAM weights without any fine-tuning:
+### 5. Generate Prompts
 
 ```bash
-python train_ultrasam.py \
-    --dataset busi \
-    --data_dir /path/to/BUSI \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --fold 0 \
-    --use_crop --crop_expand 0.3 \
-    --freeze_ultrasam
+python pipeline/04_generate_prompts.py \
+    --pred_dir outputs/transunet_preds/busi \
+    --output_dir outputs/prompts/busi
 ```
 
-This runs a single validation epoch and prints Dice/IoU/HD95 metrics.
-
-### 4.2 Fine-tune UltraSAM
+### 6. UltraSAM Inference
 
 ```bash
-python train_ultrasam.py \
-    --dataset busi \
-    --data_dir /path/to/BUSI \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --fold 0 \
-    --use_crop --crop_expand 0.3 \
-    --max_epoch 100 --batch_size 2 --lr 1e-4
+python pipeline/05_infer_ultrasam.py \
+    --prompt_dir outputs/prompts/busi \
+    --image_dir outputs/preprocessed/busi/images_fullres \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/ultrasam_preds/busi \
+    --prompt_type box \
+    --device cuda:0
 ```
 
-### 4.3 Prompt Configuration
-
-Control which prompts are sent to UltraSAM:
+### 7. Compare Results
 
 ```bash
-# Point only (no box prompt)
-python train_ultrasam.py ... --no_box
-
-# Box only (no point prompt)
-python train_ultrasam.py ... --no_point
-
-# Both point + box (default)
-python train_ultrasam.py ...
-
-# Without cropping (full image, prompts in full-image space)
-python train_ultrasam.py ...  # (omit --use_crop)
+python pipeline/06_compare.py \
+    --transunet_dir outputs/transunet_preds/busi \
+    --ultrasam_dir outputs/ultrasam_preds/busi \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/comparison/busi \
+    --vis
 ```
 
-Note: If both `--no_point` and `--no_box` are set, the script falls back to using a center point prompt.
+## Key Design Decisions
 
-### 4.4 Full Argument Reference
+- **Intermediate npz format**: All preprocessing produces `{image, label, original_size}` npz files for a consistent interface.
+- **Original-resolution prompts**: Bounding boxes and points are stored in original pixel coordinates. Transformation to UltraSAM's 1024x1024 input space happens at inference time only.
+- **Deterministic splits**: `KFold(shuffle=True, random_state=123)` ensures reproducibility across runs.
+- **UltraSAM via mmengine**: Direct `model.predict()` calls give full control over prompt injection rather than relying on CLI wrappers.
 
-| Argument | Default | Description |
-|---|---|---|
-| `--transunet_ckpt` | (required) | Path to trained TransUNet checkpoint |
-| `--ultrasam_ckpt` | `None` | Path to UltraSAM standalone weights |
-| `--no_point` | `False` | Disable point prompt |
-| `--no_box` | `False` | Disable box prompt |
-| `--use_crop` | `False` | Crop image around TransUNet prediction |
-| `--crop_expand` | `0.3` | Expand crop bbox by this ratio on each side |
-| `--freeze_ultrasam` | `False` | Freeze UltraSAM (eval-only, no backprop) |
-| `--max_epoch` | `100` | Training epochs (1 if frozen) |
-| `--batch_size` | `2` | Batch size |
-| `--lr` | `1e-4` | Learning rate (AdamW) |
-| `--weight_decay` | `1e-4` | Weight decay |
-| `--grad_clip` | `0.1` | Gradient clipping norm |
-| `--val_every` | `5` | Validate every N epochs |
+## Requirements
 
-### 4.5 Training Details
+- Python 3.8+
+- PyTorch
+- OpenCV (`opencv-python`)
+- scikit-learn
+- matplotlib
+- numpy
+- medpy (optional, for HD95)
+- mmengine, mmdet (for UltraSAM inference)
 
-- **Optimizer**: AdamW (lr=1e-4, weight_decay=1e-4)
-- **Loss**: 20 * FocalLoss + DiceLoss + IoU MSE
-- **Gradient clipping**: max norm 0.1
-- **TransUNet**: Always frozen, used for coarse prediction only
-- **Per-sample processing**: Each sample is individually cropped and prompted (crops vary in size)
+## Metrics
 
-### 4.6 Pipeline Flow (Per Sample)
-
-```
-Original image (H x W)
-    |
-    v
-TransUNet (224x224) --> coarse mask --> resize to (H x W)
-    |
-    v
-Crop image around coarse mask bbox (expanded by crop_expand)
-    |
-    v
-Resize crop to 1024x1024, compute prompts in 1024x1024 space:
-  - Point: centroid of coarse mask within crop
-  - Box: tight bbox of coarse mask within crop
-    |
-    v
-UltraSAM (1024x1024 + prompts) --> 256x256 mask logits
-    |
-    v
-Resize to crop size --> paste into full-size mask (H x W)
-```
-
-## 5. Inference
-
-Run the full two-stage pipeline on new images.
-
-### 5.1 Single Image
-
-```bash
-python inference.py \
-    --image path/to/image.png \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --use_crop --crop_expand 0.3 \
-    --save_dir output/predictions
-```
-
-### 5.2 Directory of Images
-
-```bash
-python inference.py \
-    --image_dir path/to/images/ \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --use_crop --crop_expand 0.3 \
-    --save_dir output/predictions
-```
-
-### 5.3 Evaluate on Dataset (with Ground Truth)
-
-```bash
-python inference.py \
-    --dataset busi --data_dir /path/to/BUSI \
-    --fold 0 \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --use_crop --crop_expand 0.3 \
-    --save_dir output/predictions
-```
-
-This prints per-dataset Dice, IoU, and HD95 with standard deviations.
-
-### 5.4 Save Overlay Visualizations
-
-Add `--save_overlay` to save green-tinted overlay images alongside prediction masks:
-
-```bash
-python inference.py \
-    --image_dir path/to/images/ \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --use_crop --crop_expand 0.3 \
-    --save_dir output/predictions \
-    --save_overlay
-```
-
-Output:
-```
-output/predictions/
-├── image1_pred.png       # Binary mask (0/255)
-├── image1_overlay.png    # Image with green overlay
-├── image2_pred.png
-└── image2_overlay.png
-```
-
-## 6. Complete Example: BUSI from Scratch
-
-```bash
-# 1. Setup
-pip install -r requirements.txt
-bash scripts/download_weights.sh
-# Place UltraSam.pth in weights/, then:
-python scripts/convert_ultrasam_weights.py \
-    --input weights/UltraSam.pth \
-    --output weights/ultrasam_standalone.pth --verify
-
-# 2. Phase 1: Train TransUNet (fold 0)
-python train_transunet.py \
-    --dataset busi \
-    --data_dir /path/to/BUSI \
-    --fold 0 \
-    --pretrained_path weights/R50+ViT-B_16.npz \
-    --max_epoch 1000 --batch_size 4 \
-    --output_dir output/transunet
-
-# 3. Phase 2: Evaluate with frozen UltraSAM
-python train_ultrasam.py \
-    --dataset busi \
-    --data_dir /path/to/BUSI \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --fold 0 \
-    --use_crop --crop_expand 0.3 \
-    --freeze_ultrasam
-
-# 4. (Optional) Fine-tune UltraSAM
-python train_ultrasam.py \
-    --dataset busi \
-    --data_dir /path/to/BUSI \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --fold 0 \
-    --use_crop --crop_expand 0.3 \
-    --max_epoch 100 --batch_size 2 --lr 1e-4
-
-# 5. Inference on new images
-python inference.py \
-    --image_dir /path/to/new_images/ \
-    --transunet_ckpt output/transunet/busi/fold_0/model/best.pth \
-    --ultrasam_ckpt weights/ultrasam_standalone.pth \
-    --use_crop --crop_expand 0.3 \
-    --save_dir output/predictions --save_overlay
-```
-
-## 7. Weight Conversion Details
-
-The `convert_ultrasam_weights.py` script maps mmdet checkpoint keys to standalone model keys:
-
-| mmdet prefix | Standalone prefix | Component |
-|---|---|---|
-| `backbone.*` | `image_encoder.*` | ViT-B image encoder |
-| `prompt_encoder.*` | `prompt_encoder.*` | Prompt encoder |
-| `decoder.*` | `transformer_decoder.*` | Two-way transformer |
-| `bbox_head.*` | `mask_decoder.*` | Mask decoder + IoU head |
-
-To inspect the key mapping:
-
-```bash
-# Print source checkpoint keys
-python scripts/convert_ultrasam_weights.py \
-    --input weights/UltraSam.pth \
-    --output weights/ultrasam_standalone.pth \
-    --print-src-keys
-
-# Print converted keys
-python scripts/convert_ultrasam_weights.py \
-    --input weights/UltraSam.pth \
-    --output weights/ultrasam_standalone.pth \
-    --print-dst-keys
-```
+| Metric | Description |
+|--------|-------------|
+| Dice | 2 x intersection / (pred + gt), 1.0 if both empty |
+| IoU | intersection / union, 1.0 if both empty |
+| HD95 | 95th-percentile Hausdorff distance (pixels), inf if either empty |
