@@ -70,6 +70,19 @@ def load_ultrasam_model(config_path, ckpt_path, device):
                     raise
                 print(f"Warning: Failed to import {mod_name}: {e}")
 
+    # Apply MonkeyPatchHook: replace PyTorch's multi_head_attention_forward
+    # with UltraSAM's custom version that handles 256-dim embeddings with
+    # separate projection weights. Normally the Runner triggers this hook,
+    # but we call model.predict() directly.
+    try:
+        from endosam.models.utils.custom_functional import (
+            multi_head_attention_forward as custom_mha_forward,
+        )
+        torch.nn.functional.multi_head_attention_forward = custom_mha_forward
+        print("Applied UltraSAM MonkeyPatch for multi_head_attention_forward")
+    except ImportError as e:
+        print(f"Warning: Could not apply MonkeyPatch: {e}")
+
     from mmdet.registry import MODELS
     model = MODELS.build(cfg.model)
     load_checkpoint(model, ckpt_path, map_location="cpu")
