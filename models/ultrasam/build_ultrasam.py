@@ -147,8 +147,8 @@ class UltraSAM(nn.Module):
         if box_coords is not None:
             B = box_coords.shape[0]
             boxes = box_coords.reshape(B, 1, 2, 2)  # (x1,y1) and (x2,y2) corners
-            box_labels = torch.tensor([[3, 4]], dtype=torch.long,
-                                       device=box_coords.device).expand(B, -1)  # BOX_CORNER_A, BOX_CORNER_B
+            box_labels = torch.tensor([[[3, 4]]], dtype=torch.long,
+                                       device=box_coords.device).expand(B, -1, -1)  # (B, 1, 2)
 
         # Format point labels
         points = point_coords  # (B, N, 2) or None
