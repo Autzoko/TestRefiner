@@ -39,8 +39,9 @@ def load_ultrasam_model(config_path, ckpt_path, device):
     from mmengine.config import Config
     from mmengine.runner import load_checkpoint
 
-    # Import mmdet to register built-in modules (DetDataPreprocessor, etc.)
-    import mmdet  # noqa: F401
+    # Register all mmdet built-in modules (DetDataPreprocessor, etc.)
+    from mmdet.utils import register_all_modules
+    register_all_modules()
 
     cfg = Config.fromfile(config_path)
 
