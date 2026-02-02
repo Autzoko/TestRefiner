@@ -36,7 +36,11 @@ ULTRASAM_ROOT = os.path.join(ROOT_DIR, "UltraSam")
 if ULTRASAM_ROOT not in sys.path:
     sys.path.insert(0, ULTRASAM_ROOT)
 
-from utils.prompt_utils import transform_coords
+from utils.prompt_utils import (
+    compute_crop_box,
+    transform_coords,
+    transform_prompts_to_crop_space,
+)
 
 
 def _tensor_to_numpy(t):
@@ -265,6 +269,55 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device,
     return (mask_out > 0).astype(np.uint8)
 
 
+def run_ultrasam_inference_crop(model, image_bgr, prompts, prompt_type, device,
+                                crop_expand=0.5, target_size=1024):
+    """Run UltraSAM inference on a cropped region around the prediction bbox.
+
+    Steps:
+        1. Compute crop box from prompts["box"] + crop_expand
+        2. Crop the image
+        3. Transform prompts: orig space -> crop space
+        4. Run standard inference on the crop (ori_shape = crop dimensions)
+        5. Paste crop mask back into full-size canvas
+
+    Returns: binary mask (np.uint8) at full original resolution.
+    """
+    full_h, full_w = image_bgr.shape[:2]
+
+    # Fall back to full-image inference for empty predictions
+    if prompts.get("empty_prediction", False):
+        return run_ultrasam_inference(
+            model, image_bgr, prompts, prompt_type, device, target_size)
+
+    # Compute crop region
+    crop_box = compute_crop_box(
+        prompts["box"], full_h, full_w, expand_ratio=crop_expand)
+    cx1, cy1, cx2, cy2 = crop_box
+    crop_h = cy2 - cy1
+    crop_w = cx2 - cx1
+
+    # If crop covers nearly the full image, skip cropping
+    if crop_h >= full_h * 0.95 and crop_w >= full_w * 0.95:
+        return run_ultrasam_inference(
+            model, image_bgr, prompts, prompt_type, device, target_size)
+
+    # Crop image
+    crop_bgr = image_bgr[cy1:cy2, cx1:cx2].copy()
+
+    # Transform prompts to crop space
+    crop_prompts = transform_prompts_to_crop_space(prompts, crop_box)
+
+    # Run inference on the crop — ori_shape will be (crop_h, crop_w)
+    crop_mask = run_ultrasam_inference(
+        model, crop_bgr, crop_prompts, prompt_type, device, target_size)
+
+    # Paste back into full-size canvas
+    full_mask = np.zeros((full_h, full_w), dtype=np.uint8)
+    full_mask[cy1:cy2, cx1:cx2] = crop_mask
+
+    return full_mask
+
+
 def main():
     parser = argparse.ArgumentParser(description="UltraSAM inference with TransUNet prompts")
     parser.add_argument("--prompt_dir", type=str, required=True,
@@ -278,6 +331,11 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--prompt_type", type=str, default="box",
                         choices=["box", "point", "both"])
+    parser.add_argument("--crop", action="store_true",
+                        help="Crop image around prediction bbox before inference")
+    parser.add_argument("--crop_expand", type=float, default=0.5,
+                        help="Expand crop region by this ratio beyond the prompt box "
+                             "(default: 0.5, i.e. 50%% of box dim on each side)")
     parser.add_argument("--device", type=str, default="cuda:0")
     args = parser.parse_args()
 
@@ -289,6 +347,8 @@ def main():
 
     print(f"Loading UltraSAM from {config_path}")
     print(f"Prompt type: {args.prompt_type}")
+    if args.crop:
+        print(f"Crop mode: ON (crop_expand={args.crop_expand})")
     model, cfg = load_ultrasam_model(config_path, ckpt_path, args.device)
 
     # Process each fold
@@ -325,9 +385,16 @@ def main():
                 continue
 
             try:
-                mask = run_ultrasam_inference(
-                    model, image_bgr, prompts, args.prompt_type, args.device
-                )
+                if args.crop:
+                    mask = run_ultrasam_inference_crop(
+                        model, image_bgr, prompts, args.prompt_type,
+                        args.device, crop_expand=args.crop_expand,
+                    )
+                else:
+                    mask = run_ultrasam_inference(
+                        model, image_bgr, prompts, args.prompt_type,
+                        args.device,
+                    )
             except Exception as e:
                 print(f"Error on {case_name}: {e}")
                 errors += 1
