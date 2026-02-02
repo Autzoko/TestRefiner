@@ -1,9 +1,20 @@
-"""Generate box and point prompts from TransUNet prediction masks.
+"""Generate box and point prompts from segmentation masks.
+
+By default, prompts are extracted from TransUNet prediction masks.
+Use --use_gt to generate prompts from ground-truth masks instead
+(for oracle / upper-bound comparison).
 
 Usage:
+    # From TransUNet predictions:
     python pipeline/04_generate_prompts.py \
         --pred_dir outputs/transunet_preds/busi \
         --output_dir outputs/prompts/busi
+
+    # From ground-truth masks:
+    python pipeline/04_generate_prompts.py \
+        --pred_dir outputs/transunet_preds/busi \
+        --output_dir outputs/prompts/busi_gt \
+        --use_gt
 
     # Expand bounding box by 20% on each side:
     python pipeline/04_generate_prompts.py \
@@ -37,8 +48,12 @@ def main():
     parser.add_argument("--box_expand", type=float, default=0.0,
                         help="Expand bounding box by this ratio on each side "
                              "(e.g. 0.2 = 20%% of box width/height added per side)")
+    parser.add_argument("--use_gt", action="store_true",
+                        help="Generate prompts from GT masks instead of predictions")
     args = parser.parse_args()
 
+    source = "ground-truth" if args.use_gt else "predictions"
+    print(f"Prompt source: {source}")
     if args.box_expand > 0:
         print(f"Box expand ratio: {args.box_expand}")
 
@@ -53,14 +68,19 @@ def main():
         out_fold = os.path.join(args.output_dir, fold_name)
         os.makedirs(out_fold, exist_ok=True)
 
-        pred_files = sorted(glob(os.path.join(fold_dir, "*_pred.png")))
-        for pred_path in pred_files:
-            basename = os.path.basename(pred_path).replace("_pred.png", "")
+        if args.use_gt:
+            mask_files = sorted(glob(os.path.join(fold_dir, "gt", "*_gt.png")))
+            suffix = "_gt.png"
+        else:
+            mask_files = sorted(glob(os.path.join(fold_dir, "*_pred.png")))
+            suffix = "_pred.png"
 
-            # Read prediction mask
-            mask = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
+        for mask_path in mask_files:
+            basename = os.path.basename(mask_path).replace(suffix, "")
+
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
             if mask is None:
-                print(f"Warning: Could not read {pred_path}")
+                print(f"Warning: Could not read {mask_path}")
                 continue
             binary = (mask > 127).astype(np.uint8)
             h, w = binary.shape
@@ -79,6 +99,7 @@ def main():
                 "box": bbox,
                 "point": centroid,
                 "box_expand_ratio": args.box_expand,
+                "prompt_source": "gt" if args.use_gt else "prediction",
                 "empty_prediction": not binary.any(),
             }
 
@@ -87,7 +108,7 @@ def main():
                 json.dump(prompt_data, f, indent=2)
             total += 1
 
-        print(f"{fold_name}: {len(pred_files)} prompts generated")
+        print(f"{fold_name}: {len(mask_files)} prompts generated")
 
     print(f"\nTotal prompts generated: {total}")
     print(f"Saved to: {args.output_dir}")

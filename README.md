@@ -152,7 +152,7 @@ python pipeline/03_infer_transunet.py \
 ### 5. Generate Prompts
 
 ```bash
-# Tight bounding box (default)
+# From TransUNet predictions (default)
 python pipeline/04_generate_prompts.py \
     --pred_dir outputs/transunet_preds/busi \
     --output_dir outputs/prompts/busi
@@ -162,12 +162,20 @@ python pipeline/04_generate_prompts.py \
     --pred_dir outputs/transunet_preds/busi \
     --output_dir outputs/prompts/busi_expand20 \
     --box_expand 0.2
+
+# From ground-truth masks (oracle / upper-bound comparison)
+python pipeline/04_generate_prompts.py \
+    --pred_dir outputs/transunet_preds/busi \
+    --output_dir outputs/prompts/busi_gt \
+    --use_gt --box_expand 0.2
 ```
 
-For each TransUNet prediction mask, generates:
-- **Box prompt**: tight bounding box `[x1, y1, x2, y2]` around predicted foreground, optionally expanded by `--box_expand` ratio (clamped to image bounds)
-- **Point prompt**: centroid `[x, y]` of predicted foreground region
-- Fallback for empty predictions: full-image box, image-center point
+For each mask, generates:
+- **Box prompt**: tight bounding box `[x1, y1, x2, y2]` around foreground, optionally expanded by `--box_expand` ratio (clamped to image bounds)
+- **Point prompt**: centroid `[x, y]` of foreground region
+- Fallback for empty masks: full-image box, image-center point
+
+By default, prompts come from TransUNet predictions (`fold_*/*_pred.png`). With `--use_gt`, prompts are extracted from ground-truth masks (`fold_*/gt/*_gt.png`) instead — useful for measuring UltraSAM's upper-bound performance with perfect prompts.
 
 All coordinates are in original pixel space. Transformation to UltraSAM's 1024x1024 input space happens at inference time.
 
@@ -238,11 +246,11 @@ python pipeline/06_compare.py \
 - Computes Dice, IoU, HD95 per sample for both TransUNet and UltraSAM
 - Aggregates per-fold (mean +/- std) and overall
 - Outputs `per_sample.csv` and `metrics_summary.csv`
-- `--vis` generates 4-panel figures: image+GT, TransUNet pred, UltraSAM pred, prompt overlay
+- `--vis` generates 4-panel figures: image+GT, TransUNet pred+prompts, UltraSAM pred+prompts, prompts only (requires `--prompt_dir`)
 
 ## Key Design Decisions
 
-- **Prompts from predictions, not GT**: Both box and point prompts are derived entirely from TransUNet's predicted masks. Ground truth is never used for prompt generation — only for final metric evaluation.
+- **Prompts from predictions or GT**: By default, prompts are derived from TransUNet's predicted masks. Use `--use_gt` to generate prompts from ground-truth masks instead, providing an oracle upper-bound for UltraSAM performance.
 - **Intermediate npz format**: All preprocessing produces `{image, label, original_size}` npz files for a consistent interface between steps.
 - **Original-resolution prompts**: Bounding boxes and points are stored in original pixel coordinates. Transformation to UltraSAM's 1024x1024 input space happens at inference time only.
 - **Deterministic splits**: `KFold(shuffle=True, random_state=123)` ensures reproducibility across runs.

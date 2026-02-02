@@ -8,6 +8,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _draw_prompts(ax: plt.Axes, prompts: Dict) -> None:
+    """Draw box and point prompts on a matplotlib axis."""
+    bbox = prompts.get("box")
+    point = prompts.get("point")
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        rect = plt.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1,
+            linewidth=2, edgecolor="yellow", facecolor="none",
+        )
+        ax.add_patch(rect)
+    if point is not None:
+        ax.plot(point[0], point[1], "r*", markersize=15)
+
+
 def visualize_comparison(
     image: np.ndarray,
     gt: np.ndarray,
@@ -18,8 +33,10 @@ def visualize_comparison(
 ) -> None:
     """Create 4-panel comparison figure.
 
-    Panels: (1) Image + GT overlay, (2) TransUNet pred, (3) UltraSAM pred,
-    (4) Image + prompt box/point overlay.
+    Panels: (1) Image + GT overlay, (2) TransUNet pred + prompts,
+    (3) UltraSAM pred + prompts, (4) Image + prompts only.
+
+    Box prompt is drawn as a yellow rectangle, point prompt as a red star.
     """
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
@@ -29,32 +46,26 @@ def visualize_comparison(
     axes[0].set_title("Image + GT")
     axes[0].axis("off")
 
-    # Panel 2: TransUNet prediction
+    # Panel 2: TransUNet prediction + prompts
     axes[1].imshow(image)
     _overlay_mask(axes[1], transunet_pred, color="blue", alpha=0.35)
+    if prompts is not None:
+        _draw_prompts(axes[1], prompts)
     axes[1].set_title("TransUNet")
     axes[1].axis("off")
 
-    # Panel 3: UltraSAM prediction
+    # Panel 3: UltraSAM prediction + prompts
     axes[2].imshow(image)
     _overlay_mask(axes[2], ultrasam_pred, color="red", alpha=0.35)
+    if prompts is not None:
+        _draw_prompts(axes[2], prompts)
     axes[2].set_title("UltraSAM")
     axes[2].axis("off")
 
-    # Panel 4: Image + prompts
+    # Panel 4: Image + prompts only
     axes[3].imshow(image)
     if prompts is not None:
-        bbox = prompts.get("box")
-        point = prompts.get("point")
-        if bbox is not None:
-            x1, y1, x2, y2 = bbox
-            rect = plt.Rectangle(
-                (x1, y1), x2 - x1, y2 - y1,
-                linewidth=2, edgecolor="yellow", facecolor="none",
-            )
-            axes[3].add_patch(rect)
-        if point is not None:
-            axes[3].plot(point[0], point[1], "r*", markersize=15)
+        _draw_prompts(axes[3], prompts)
     axes[3].set_title("Prompts")
     axes[3].axis("off")
 
