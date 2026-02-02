@@ -26,6 +26,11 @@ import torch
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT_DIR, "pipeline"))
 
+# Add UltraSam root to sys.path so that endosam.* imports resolve
+ULTRASAM_ROOT = os.path.join(ROOT_DIR, "UltraSam")
+if ULTRASAM_ROOT not in sys.path:
+    sys.path.insert(0, ULTRASAM_ROOT)
+
 from utils.prompt_utils import transform_coords
 
 
@@ -33,9 +38,26 @@ def load_ultrasam_model(config_path, ckpt_path, device):
     """Build and load UltraSAM model using mmengine."""
     from mmengine.config import Config
     from mmengine.runner import load_checkpoint
-    from mmdet.registry import MODELS
+
+    # Import mmdet to register built-in modules (DetDataPreprocessor, etc.)
+    import mmdet  # noqa: F401
 
     cfg = Config.fromfile(config_path)
+
+    # Process custom_imports from the config to register UltraSam modules
+    if hasattr(cfg, "custom_imports"):
+        import importlib
+        modules = cfg.custom_imports.get("imports", [])
+        allow_failed = cfg.custom_imports.get("allow_failed_imports", False)
+        for mod_name in modules:
+            try:
+                importlib.import_module(mod_name)
+            except ImportError as e:
+                if not allow_failed:
+                    raise
+                print(f"Warning: Failed to import {mod_name}: {e}")
+
+    from mmdet.registry import MODELS
     model = MODELS.build(cfg.model)
     load_checkpoint(model, ckpt_path, map_location="cpu")
     model = model.to(device)
