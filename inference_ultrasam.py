@@ -258,6 +258,14 @@ def run_inference(args):
         print(f"  Unexpected keys: {len(result.unexpected_keys)}")
         for k in result.unexpected_keys[:10]:
             print(f"    {k}")
+    if not result.missing_keys and not result.unexpected_keys:
+        print("  All keys matched perfectly!")
+    else:
+        total_model = len(model.state_dict())
+        loaded = total_model - len(result.missing_keys)
+        print(f"  Loaded {loaded}/{total_model} model parameters "
+              f"({len(result.missing_keys)} missing, "
+              f"{len(result.unexpected_keys)} unexpected)")
     model = model.to(device).eval()
     print(f"  Device: {device}")
 
@@ -277,6 +285,7 @@ def run_inference(args):
 
     # Run inference
     dice_scores, iou_scores, hd95_scores = [], [], []
+    is_first_sample = True
 
     for sample in tqdm(samples, desc='UltraSAM Inference'):
         # --- Load raw image and GT mask at original resolution -------------
@@ -323,6 +332,21 @@ def run_inference(args):
                 multimask_output=False,
             )
             # mask_logits_1: (1, 1, 256, 256)
+
+            # Diagnostic output for the first sample
+            if is_first_sample:
+                is_first_sample = False
+                feat = image_embeddings
+                print(f"\n  [DEBUG] First sample: {sample['name']}")
+                print(f"  [DEBUG] Image shape: {image_rgb.shape}, GT mask sum: {gt_mask.sum()}")
+                print(f"  [DEBUG] Center point (resized coords): {center}")
+                print(f"  [DEBUG] Image features: min={feat.min():.4f}, max={feat.max():.4f}, "
+                      f"mean={feat.mean():.4f}, nonzero={(feat != 0).float().mean():.4f}")
+                print(f"  [DEBUG] Mask logits (pass 1): min={mask_logits_1.min():.4f}, "
+                      f"max={mask_logits_1.max():.4f}, "
+                      f"positive={int((mask_logits_1 > 0).sum())}/{mask_logits_1.numel()}")
+                print(f"  [DEBUG] IoU pred (pass 1): {iou_pred_1}")
+                print()
 
             if use_refinement:
                 # --- 6. REFINEMENT: mask prompt + box prompt ---------------
