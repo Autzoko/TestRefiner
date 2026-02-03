@@ -312,7 +312,8 @@ When using crop mode for inference, UltraSAM sees cropped regions that differ fr
 | Step | Script | Description |
 |------|--------|-------------|
 | 7 | `pipeline/07_generate_crop_data.py` | Generate cropped training data from preprocessed images |
-| 8 | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data |
+| 8a | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data (full finetuning) |
+| 8b | `pipeline/08_finetune_ultrasam_lora.py` | Finetune UltraSAM with LoRA + optional FFN (parameter-efficient) |
 
 ### Quick Start (Finetuning)
 
@@ -491,6 +492,33 @@ python pipeline/06_compare.py \
 
 For efficient finetuning with minimal GPU memory, use LoRA (Low-Rank Adaptation). This method trains only small adapter matrices in the ViT backbone while keeping the original weights frozen.
 
+### Why LoRA?
+
+- **Memory efficient**: Only ~1-15% of parameters are trainable
+- **Fast training**: Fewer gradients to compute
+- **Less overfitting**: Constrains the model to stay close to pretrained weights
+- **Modular**: LoRA weights can be merged back or swapped easily
+
+### LoRA + FFN Strategy
+
+The recommended approach combines LoRA adapters on attention layers with full training of FFN (Feed-Forward Network) layers:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ViT-SAM Backbone                         │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Transformer Block (x12)                             │   │
+│  │  ┌───────────────┐    ┌───────────────┐             │   │
+│  │  │  Attention    │    │     FFN       │             │   │
+│  │  │  Q K V ← LoRA │    │  (trainable)  │             │   │
+│  │  └───────────────┘    └───────────────┘             │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **LoRA on QKV**: Low-rank adapters modify attention without changing pretrained weights
+- **FFN trainable**: Feed-forward layers learn domain-specific features
+
 ### LoRA Quick Start
 
 ```bash
@@ -526,6 +554,14 @@ python pipeline/05_infer_ultrasam.py \
     --ultrasam_ckpt outputs/finetuned_ultrasam_lora/busi/best.pth \
     --output_dir outputs/ultrasam_preds_lora/busi \
     --prompt_type box --crop --crop_expand 0.5 --square
+
+# 5. Compare results
+python pipeline/06_compare.py \
+    --transunet_dir outputs/transunet_preds/busi \
+    --ultrasam_dir outputs/ultrasam_preds_lora/busi \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/comparison/busi_lora \
+    --vis
 ```
 
 ### LoRA Configuration
@@ -592,3 +628,36 @@ The aspect ratio is enforced by:
 2. Expanding the smaller dimension to match the target ratio
 3. Clamping to image bounds
 4. If clamping breaks the ratio, shrinking the larger dimension
+
+### LoRA Finetuning Tips
+
+1. **Start with LoRA + FFN**: This combination provides good balance between efficiency and adaptation capability:
+   ```bash
+   python pipeline/08_finetune_ultrasam_lora.py ... --lora_rank 16 --train_ffn
+   ```
+
+2. **Use consistent settings**: Match `--crop_expand` and `--square`/`--aspect_ratio` between data generation and inference.
+
+3. **Monitor training**: The script validates every 5 epochs and saves `best.pth` based on IoU.
+
+4. **Adjust LoRA rank**: Higher rank (32, 64) for more complex domain shifts; lower rank (8, 16) for subtle adaptations.
+
+5. **Learning rate**: Default 1e-4 works well for LoRA. Reduce to 1e-5 if training is unstable.
+
+### Checkpoint Format
+
+LoRA finetuned checkpoints contain:
+```python
+{
+    "epoch": int,
+    "model_state_dict": {...},  # Full model including LoRA weights
+    "lora_config": {
+        "rank": 16,
+        "alpha": 16,
+        "dropout": 0.1
+    },
+    "val_iou": float
+}
+```
+
+The inference script (`05_infer_ultrasam.py`) automatically detects and loads both original UltraSAM checkpoints and LoRA-finetuned checkpoints
