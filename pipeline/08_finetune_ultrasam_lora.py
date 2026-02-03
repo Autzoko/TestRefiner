@@ -243,8 +243,9 @@ def build_lora_model(
         print(f"Warning: Could not apply MonkeyPatch: {e}")
 
     # Modify backbone config to use LoRA wrapper
+    # Note: We don't use _delete_=True here since we're directly assigning,
+    # not merging with config inheritance
     cfg.model.backbone = dict(
-        _delete_=True,
         type='mmpretrain.LoRAModel',
         module=dict(
             type='mmpretrain.ViTSAM',
