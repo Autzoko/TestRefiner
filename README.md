@@ -11,8 +11,10 @@ A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation
 | 2 | `pipeline/02_train_transunet.py` | Train TransUNet with 5-fold cross-validation |
 | 3 | `pipeline/03_infer_transunet.py` | Run TransUNet inference on all validation folds |
 | 4 | `pipeline/04_generate_prompts.py` | Extract bounding-box / point prompts from TransUNet predictions |
-| 5 | `pipeline/05_infer_ultrasam.py` | Run frozen UltraSAM with generated prompts |
+| 5 | `pipeline/05_infer_ultrasam.py` | Run UltraSAM with generated prompts (supports crop mode) |
 | 6 | `pipeline/06_compare.py` | Compare metrics and optionally visualize results |
+| 7 | `pipeline/07_generate_crop_data.py` | Generate cropped training data for UltraSAM finetuning |
+| 8 | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data |
 
 ## Data Flow
 
@@ -62,6 +64,9 @@ UltraRefiner/
 │   ├── 04_generate_prompts.py
 │   ├── 05_infer_ultrasam.py
 │   ├── 06_compare.py
+│   ├── 07_generate_crop_data.py        # Generate cropped data for finetuning
+│   ├── 08_finetune_ultrasam_standalone.py  # Finetune UltraSAM
+│   ├── run_crop_finetune.sh            # Convenience script for full pipeline
 │   └── utils/
 │       ├── metrics.py          # Dice, IoU, HD95
 │       ├── prompt_utils.py     # mask → bbox / centroid, coordinate transforms
@@ -279,3 +284,187 @@ Use `bash install_env.sh` to install all dependencies automatically.
 | Dice | 2 x intersection / (pred + gt), 1.0 if both empty |
 | IoU | intersection / union, 1.0 if both empty |
 | HD95 | 95th-percentile Hausdorff distance (pixels), inf if either empty |
+
+---
+
+## UltraSAM Crop Finetuning
+
+When using crop mode for inference, UltraSAM sees cropped regions that differ from its original training distribution. Finetuning on cropped data can improve performance.
+
+### Finetuning Pipeline Overview
+
+| Step | Script | Description |
+|------|--------|-------------|
+| 7 | `pipeline/07_generate_crop_data.py` | Generate cropped training data from preprocessed images |
+| 8 | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data |
+
+### Quick Start (Finetuning)
+
+```bash
+# 1. Generate cropped training data
+python pipeline/07_generate_crop_data.py \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/crop_data/busi \
+    --crop_expand 0.5 \
+    --n_folds 5
+
+# 2. Finetune UltraSAM (freeze backbone, train decoder + head)
+python pipeline/08_finetune_ultrasam_standalone.py \
+    --data_dir outputs/crop_data/busi/combined \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/finetuned_ultrasam/busi \
+    --freeze_backbone \
+    --epochs 50 \
+    --batch_size 4 \
+    --lr 1e-4 \
+    --device cuda:0
+
+# 3. Run inference with finetuned model
+python pipeline/05_infer_ultrasam.py \
+    --prompt_dir outputs/prompts/busi \
+    --image_dir outputs/preprocessed/busi/images_fullres \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt outputs/finetuned_ultrasam/busi/best.pth \
+    --output_dir outputs/ultrasam_preds_finetuned/busi \
+    --prompt_type box --crop --crop_expand 0.5
+```
+
+Or use the convenience script:
+
+```bash
+./pipeline/run_crop_finetune.sh busi
+```
+
+### Cropped Data Generation
+
+The `07_generate_crop_data.py` script:
+- Takes preprocessed images and GT masks
+- Computes crop regions around each GT mask (using `compute_crop_box()`)
+- Saves cropped images and masks in COCO format
+- Creates per-fold splits (same as TransUNet training) + a combined dataset
+
+```bash
+python pipeline/07_generate_crop_data.py \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/crop_data/busi \
+    --crop_expand 0.5 \
+    --n_folds 5 \
+    --min_crop_size 64
+```
+
+Output structure:
+```
+outputs/crop_data/busi/
+├── fold_0/
+│   ├── images/           # Cropped images
+│   ├── annotations/
+│   │   ├── train.json    # COCO format
+│   │   └── val.json
+│   └── split.json
+├── fold_1/ ...
+├── combined/             # All data combined (no fold split)
+│   ├── images/
+│   └── annotations/
+│       └── train.json
+```
+
+### Finetuning Script
+
+The `08_finetune_ultrasam_standalone.py` script provides fine-grained control over which model components to train/freeze.
+
+**Model Architecture:**
+- `backbone`: ViT-SAM image encoder (~90M params, often frozen)
+- `prompt_encoder`: Encodes point/box prompts (~6M params)
+- `decoder`: SAM transformer decoder (2 layers, ~4M params)
+- `bbox_head`: SAMHead mask prediction head (~4M params)
+
+**Freezing Options:**
+
+| Flag | Effect |
+|------|--------|
+| `--freeze_backbone` | Freeze entire image encoder |
+| `--unfreeze_backbone_layers N` | If backbone frozen, unfreeze last N layers |
+| `--freeze_prompt_encoder` | Freeze prompt encoder |
+| `--freeze_decoder` | Freeze transformer decoder |
+| `--freeze_mask_head` | Freeze mask prediction head |
+
+**Convenience Presets:**
+
+| Preset | Effect |
+|--------|--------|
+| `--freeze_all_but_head` | Freeze backbone + prompt_encoder + decoder; train only mask head |
+| `--freeze_all_but_decoder_head` | Freeze backbone + prompt_encoder; train decoder + mask head |
+
+**Recommended Strategies:**
+
+1. **Full finetune** (most expensive, best results):
+   ```bash
+   # No freeze flags - train everything
+   python pipeline/08_finetune_ultrasam_standalone.py ...
+   ```
+
+2. **Freeze backbone** (recommended for most cases):
+   ```bash
+   python pipeline/08_finetune_ultrasam_standalone.py ... --freeze_backbone
+   ```
+
+3. **Freeze backbone + unfreeze last N layers** (gradual unfreezing):
+   ```bash
+   python pipeline/08_finetune_ultrasam_standalone.py ... --freeze_backbone --unfreeze_backbone_layers 2
+   ```
+
+4. **Train only mask head** (fastest, for small datasets):
+   ```bash
+   python pipeline/08_finetune_ultrasam_standalone.py ... --freeze_all_but_head
+   ```
+
+**Training Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--epochs` | 50 | Number of training epochs |
+| `--batch_size` | 4 | Training batch size |
+| `--lr` | 1e-4 | Learning rate |
+| `--prompt_type` | box | Prompt type for training (box/point/both) |
+| `--device` | cuda:0 | CUDA device |
+
+**Outputs:**
+- `best.pth`: Best model by validation IoU
+- `final.pth`: Final model after all epochs
+- `epoch_*.pth`: Checkpoints every 10 epochs
+
+### Using Finetuned Model for Inference
+
+The inference script automatically handles both original and finetuned checkpoint formats:
+
+```bash
+# With finetuned model
+python pipeline/05_infer_ultrasam.py \
+    --prompt_dir outputs/prompts/busi \
+    --image_dir outputs/preprocessed/busi/images_fullres \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt outputs/finetuned_ultrasam/busi/best.pth \
+    --output_dir outputs/ultrasam_preds_finetuned/busi \
+    --prompt_type box --crop --crop_expand 0.5
+
+# Compare with original model
+python pipeline/06_compare.py \
+    --transunet_dir outputs/transunet_preds/busi \
+    --ultrasam_dir outputs/ultrasam_preds_finetuned/busi \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/comparison/busi_finetuned \
+    --vis
+```
+
+### Finetuning Tips
+
+1. **Start with frozen backbone**: The ViT-SAM backbone is well-pretrained. Start by freezing it and training only the decoder + head. If performance plateaus, try unfreezing the last few backbone layers.
+
+2. **Use appropriate learning rate**: For frozen backbone, use 1e-4. For full finetuning, use 1e-5 or lower.
+
+3. **Match crop_expand values**: Use the same `--crop_expand` value for data generation, finetuning, and inference.
+
+4. **Monitor validation metrics**: The script saves `best.pth` based on validation IoU. Use `--val_interval` to control validation frequency.
+
+5. **Data augmentation**: The standalone script applies random horizontal flips during training. The mmengine-based script uses the full UltraSAM augmentation pipeline.

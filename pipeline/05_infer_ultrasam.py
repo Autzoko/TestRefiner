@@ -51,7 +51,12 @@ def _tensor_to_numpy(t):
 
 
 def load_ultrasam_model(config_path, ckpt_path, device):
-    """Build and load UltraSAM model using mmengine."""
+    """Build and load UltraSAM model using mmengine.
+
+    Supports both:
+    - Original UltraSAM checkpoint format (mmengine)
+    - Custom finetuned checkpoint format (with model_state_dict key)
+    """
     from mmengine.config import Config
     from mmengine.runner import load_checkpoint
 
@@ -89,7 +94,25 @@ def load_ultrasam_model(config_path, ckpt_path, device):
 
     from mmdet.registry import MODELS
     model = MODELS.build(cfg.model)
-    load_checkpoint(model, ckpt_path, map_location="cpu")
+
+    # Load checkpoint - handle both mmengine and custom formats
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        # Custom finetuned checkpoint format
+        print("Loading finetuned checkpoint (custom format)")
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        if "epoch" in ckpt:
+            print(f"  Checkpoint from epoch {ckpt['epoch']}")
+        if "val_iou" in ckpt:
+            print(f"  Validation IoU: {ckpt['val_iou']:.4f}")
+    elif isinstance(ckpt, dict) and "state_dict" in ckpt:
+        # mmengine checkpoint format
+        print("Loading checkpoint (mmengine format)")
+        load_checkpoint(model, ckpt_path, map_location="cpu")
+    else:
+        # Try default loading
+        load_checkpoint(model, ckpt_path, map_location="cpu")
+
     model = model.to(device)
     model.eval()
     return model, cfg
