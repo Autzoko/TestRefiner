@@ -16,6 +16,8 @@ A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation
 | 7 | `pipeline/07_generate_crop_data.py` | Generate cropped training data for UltraSAM finetuning |
 | 8a | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data (full finetuning) |
 | 8b | `pipeline/08_finetune_ultrasam_lora.py` | Finetune UltraSAM with LoRA + optional FFN training |
+| 9 | `pipeline/09_infer_ultrasam_abus.py` | Direct UltraSAM inference on ABUS dataset |
+| 10 | `pipeline/10_generate_crop_data_abus.py` | Generate crop data from ABUS for finetuning |
 
 ## Data Flow
 
@@ -661,3 +663,123 @@ LoRA finetuned checkpoints contain:
 ```
 
 The inference script (`05_infer_ultrasam.py`) automatically detects and loads both original UltraSAM checkpoints and LoRA-finetuned checkpoints
+
+---
+
+## ABUS Dataset (3D→2D Slices)
+
+The ABUS (Automated Breast Ultrasound System) dataset uses predefined Train/Validation/Test splits instead of k-fold cross-validation.
+
+### Dataset Structure
+
+```
+ABUS/
+├── Train/
+│   ├── malignant (020)_342.png       # Image
+│   ├── malignant (020)_342_mask.png  # Mask
+│   └── ...
+├── Validation/
+│   └── ...
+├── Test/
+│   └── ...
+├── Train_metadata.csv
+├── Validation_metadata.csv
+└── Test_metadata.csv
+```
+
+### ABUS Quick Start
+
+```bash
+# 1. Preprocess ABUS dataset
+python pipeline/01_preprocess.py \
+    --dataset abus \
+    --data_dir /path/to/ABUS \
+    --output_dir outputs/preprocessed/abus
+
+# 2. Direct inference (without finetuning) on test set
+python pipeline/09_infer_ultrasam_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/ultrasam_preds/abus \
+    --split test \
+    --prompt_type box \
+    --device cuda:0
+
+# 3. Direct inference with crop mode
+python pipeline/09_infer_ultrasam_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/ultrasam_preds/abus_crop \
+    --split test \
+    --prompt_type box \
+    --crop --crop_expand 0.5 --square \
+    --device cuda:0
+```
+
+### ABUS Finetuning
+
+```bash
+# 1. Generate cropped training data
+python pipeline/10_generate_crop_data_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --output_dir outputs/crop_data/abus \
+    --crop_expand 0.5 --square
+
+# 2. LoRA finetuning on ABUS
+python pipeline/08_finetune_ultrasam_lora.py \
+    --data_dir outputs/crop_data/abus/combined \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/finetuned_ultrasam_lora/abus \
+    --lora_rank 16 --train_ffn \
+    --epochs 50 \
+    --device cuda:0
+
+# 3. Inference with finetuned model
+python pipeline/09_infer_ultrasam_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt outputs/finetuned_ultrasam_lora/abus/best.pth \
+    --output_dir outputs/ultrasam_preds/abus_finetuned \
+    --split test \
+    --prompt_type box \
+    --crop --crop_expand 0.5 --square \
+    --device cuda:0
+```
+
+### ABUS Output Structure
+
+After preprocessing:
+```
+outputs/preprocessed/abus/
+├── train/
+│   ├── *.npz                # {image, label, original_size}
+│   └── images_fullres/*.png
+├── val/
+│   ├── *.npz
+│   └── images_fullres/*.png
+└── test/
+    ├── *.npz
+    └── images_fullres/*.png
+```
+
+After inference:
+```
+outputs/ultrasam_preds/abus/
+└── test/
+    ├── predictions/*_pred.png
+    ├── gt/*_gt.png
+    ├── metrics.json
+    └── summary.json
+```
+
+### ABUS vs BUSI/BUSBRA Pipeline
+
+| Aspect | ABUS | BUSI/BUSBRA |
+|--------|------|-------------|
+| Splits | Predefined Train/Val/Test | K-fold CV |
+| Preprocessing | `01_preprocess.py --dataset abus` | `01_preprocess.py --dataset busi/busbra` |
+| Inference | `09_infer_ultrasam_abus.py` | `05_infer_ultrasam.py` |
+| Crop data | `10_generate_crop_data_abus.py` | `07_generate_crop_data.py` |
+| Finetuning | Same (`08_finetune_ultrasam_lora.py`) | Same |
