@@ -86,7 +86,7 @@ def create_coco_annotation(
 
 def process_sample(
     image_path: str,
-    mask_path: str,
+    npz_path: str,
     image_id: int,
     ann_id_start: int,
     output_images_dir: str,
@@ -97,7 +97,7 @@ def process_sample(
 
     Args:
         image_path: Path to full-res image.
-        mask_path: Path to GT mask.
+        npz_path: Path to npz file containing the mask.
         image_id: Unique ID for this image.
         ann_id_start: Starting annotation ID.
         output_images_dir: Directory to save cropped images.
@@ -107,14 +107,15 @@ def process_sample(
     Returns:
         Tuple of (image_info dict, list of annotation dicts, next ann_id).
     """
-    # Load image and mask
+    # Load image
     image_bgr = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-
-    if image_bgr is None or mask is None:
+    if image_bgr is None:
         return None, [], ann_id_start
 
-    mask = (mask > 127).astype(np.uint8)
+    # Load mask from npz
+    mask = load_mask_from_npz(npz_path)
+    if mask is None:
+        return None, [], ann_id_start
 
     if not mask.any():
         return None, [], ann_id_start
@@ -176,6 +177,23 @@ def process_sample(
     return image_info, annotations, next_ann_id
 
 
+def load_mask_from_npz(npz_path: str) -> Optional[np.ndarray]:
+    """Load mask from npz file.
+
+    Args:
+        npz_path: Path to npz file.
+
+    Returns:
+        Binary mask as uint8 array, or None if not found.
+    """
+    if not os.path.exists(npz_path):
+        return None
+    data = np.load(npz_path)
+    if "label" not in data:
+        return None
+    return (data["label"] > 0).astype(np.uint8)
+
+
 def generate_crop_dataset(
     data_dir: str,
     output_dir: str,
@@ -186,20 +204,22 @@ def generate_crop_dataset(
     """Generate cropped dataset from preprocessed data.
 
     Args:
-        data_dir: Directory with preprocessed data (images_fullres/, masks_fullres/).
+        data_dir: Directory with preprocessed data (npz files + images_fullres/).
         output_dir: Output directory for cropped data.
         crop_expand: Expansion ratio for crop regions.
         n_folds: Number of cross-validation folds (for split consistency).
         min_crop_size: Minimum crop dimension.
     """
     images_dir = os.path.join(data_dir, "images_fullres")
-    masks_dir = os.path.join(data_dir, "masks_fullres")
 
     if not os.path.exists(images_dir):
         print(f"Error: Images directory not found: {images_dir}")
         return
-    if not os.path.exists(masks_dir):
-        print(f"Error: Masks directory not found: {masks_dir}")
+
+    # Check for npz files (masks are stored in npz as 'label')
+    npz_files = sorted(glob(os.path.join(data_dir, "*.npz")))
+    if not npz_files:
+        print(f"Error: No npz files found in {data_dir}")
         return
 
     # Create output directories
@@ -209,7 +229,7 @@ def generate_crop_dataset(
 
     # Get all image files
     image_files = sorted(glob(os.path.join(images_dir, "*.png")))
-    print(f"Found {len(image_files)} images")
+    print(f"Found {len(image_files)} images, {len(npz_files)} npz files")
 
     # Create k-fold splits (same random state as TransUNet training)
     from sklearn.model_selection import KFold
@@ -236,14 +256,14 @@ def generate_crop_dataset(
         for idx in train_indices:
             image_path = image_files[idx]
             case_name = case_names[idx]
-            mask_path = os.path.join(masks_dir, f"{case_name}.png")
+            npz_path = os.path.join(data_dir, f"{case_name}.npz")
 
-            if not os.path.exists(mask_path):
-                print(f"  Warning: Mask not found for {case_name}")
+            if not os.path.exists(npz_path):
+                print(f"  Warning: NPZ not found for {case_name}")
                 continue
 
             image_info, annotations, ann_id = process_sample(
-                image_path, mask_path, image_id, ann_id,
+                image_path, npz_path, image_id, ann_id,
                 fold_images_dir, crop_expand, min_crop_size,
             )
 
@@ -274,13 +294,13 @@ def generate_crop_dataset(
         for idx in val_indices:
             image_path = image_files[idx]
             case_name = case_names[idx]
-            mask_path = os.path.join(masks_dir, f"{case_name}.png")
+            npz_path = os.path.join(data_dir, f"{case_name}.npz")
 
-            if not os.path.exists(mask_path):
+            if not os.path.exists(npz_path):
                 continue
 
             image_info, annotations, val_ann_id = process_sample(
-                image_path, mask_path, val_image_id, val_ann_id,
+                image_path, npz_path, val_image_id, val_ann_id,
                 fold_images_dir, crop_expand, min_crop_size,
             )
 
@@ -325,13 +345,13 @@ def generate_crop_dataset(
 
     for image_path in image_files:
         case_name = os.path.splitext(os.path.basename(image_path))[0]
-        mask_path = os.path.join(masks_dir, f"{case_name}.png")
+        npz_path = os.path.join(data_dir, f"{case_name}.npz")
 
-        if not os.path.exists(mask_path):
+        if not os.path.exists(npz_path):
             continue
 
         image_info, annotations, ann_id = process_sample(
-            image_path, mask_path, image_id, ann_id,
+            image_path, npz_path, image_id, ann_id,
             combined_images_dir, crop_expand, min_crop_size,
         )
 
@@ -357,7 +377,7 @@ def generate_crop_dataset(
 def main():
     parser = argparse.ArgumentParser(description="Generate cropped training data for UltraSAM")
     parser.add_argument("--data_dir", type=str, required=True,
-                        help="Directory with preprocessed data (images_fullres/, masks_fullres/)")
+                        help="Directory with preprocessed data (npz files + images_fullres/)")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory for cropped data")
     parser.add_argument("--crop_expand", type=float, default=0.5,
