@@ -69,6 +69,25 @@ class CropDataset(Dataset):
 
         # Load COCO annotations
         ann_path = os.path.join(data_dir, "annotations", "train.json")
+        if not os.path.exists(ann_path):
+            # Provide helpful error message
+            combined_path = os.path.join(data_dir, "combined", "annotations", "train.json")
+            if os.path.exists(combined_path):
+                raise FileNotFoundError(
+                    f"Annotation file not found at: {ann_path}\n"
+                    f"Did you mean to use: {os.path.join(data_dir, 'combined')}?\n"
+                    f"Use --data_dir {os.path.join(data_dir, 'combined')} instead."
+                )
+            else:
+                raise FileNotFoundError(
+                    f"Annotation file not found at: {ann_path}\n"
+                    f"Expected directory structure:\n"
+                    f"  {data_dir}/\n"
+                    f"    images/\n"
+                    f"    annotations/\n"
+                    f"      train.json\n"
+                    f"Run 07_generate_crop_data.py first, then use the 'combined' subdirectory."
+                )
         with open(ann_path) as f:
             coco_data = json.load(f)
 
