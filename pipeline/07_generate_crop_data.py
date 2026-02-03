@@ -92,6 +92,7 @@ def process_sample(
     output_images_dir: str,
     crop_expand: float = 0.5,
     min_crop_size: int = 64,
+    fixed_aspect_ratio: Optional[float] = None,
 ) -> Tuple[Optional[Dict], List[Dict], int]:
     """Process a single sample to create cropped data.
 
@@ -103,6 +104,7 @@ def process_sample(
         output_images_dir: Directory to save cropped images.
         crop_expand: Expansion ratio for crop region.
         min_crop_size: Minimum crop dimension.
+        fixed_aspect_ratio: If provided, enforce this W/H ratio (1.0 for square).
 
     Returns:
         Tuple of (image_info dict, list of annotation dicts, next ann_id).
@@ -129,7 +131,8 @@ def process_sample(
 
     # Compute crop region
     crop_box = compute_crop_box(bbox, full_h, full_w, expand_ratio=crop_expand,
-                                 min_crop_size=min_crop_size)
+                                 min_crop_size=min_crop_size,
+                                 fixed_aspect_ratio=fixed_aspect_ratio)
     cx1, cy1, cx2, cy2 = crop_box
     crop_h = cy2 - cy1
     crop_w = cx2 - cx1
@@ -200,6 +203,7 @@ def generate_crop_dataset(
     crop_expand: float = 0.5,
     n_folds: int = 5,
     min_crop_size: int = 64,
+    fixed_aspect_ratio: Optional[float] = None,
 ):
     """Generate cropped dataset from preprocessed data.
 
@@ -209,6 +213,7 @@ def generate_crop_dataset(
         crop_expand: Expansion ratio for crop regions.
         n_folds: Number of cross-validation folds (for split consistency).
         min_crop_size: Minimum crop dimension.
+        fixed_aspect_ratio: If provided, enforce this W/H ratio (1.0 for square).
     """
     images_dir = os.path.join(data_dir, "images_fullres")
 
@@ -264,7 +269,7 @@ def generate_crop_dataset(
 
             image_info, annotations, ann_id = process_sample(
                 image_path, npz_path, image_id, ann_id,
-                fold_images_dir, crop_expand, min_crop_size,
+                fold_images_dir, crop_expand, min_crop_size, fixed_aspect_ratio,
             )
 
             if image_info:
@@ -301,7 +306,7 @@ def generate_crop_dataset(
 
             image_info, annotations, val_ann_id = process_sample(
                 image_path, npz_path, val_image_id, val_ann_id,
-                fold_images_dir, crop_expand, min_crop_size,
+                fold_images_dir, crop_expand, min_crop_size, fixed_aspect_ratio,
             )
 
             if image_info:
@@ -352,7 +357,7 @@ def generate_crop_dataset(
 
         image_info, annotations, ann_id = process_sample(
             image_path, npz_path, image_id, ann_id,
-            combined_images_dir, crop_expand, min_crop_size,
+            combined_images_dir, crop_expand, min_crop_size, fixed_aspect_ratio,
         )
 
         if image_info:
@@ -386,7 +391,17 @@ def main():
                         help="Number of cross-validation folds (default: 5)")
     parser.add_argument("--min_crop_size", type=int, default=64,
                         help="Minimum crop dimension in pixels (default: 64)")
+    parser.add_argument("--square", action="store_true",
+                        help="Force square crops (W/H ratio = 1.0)")
+    parser.add_argument("--aspect_ratio", type=float, default=None,
+                        help="Fixed W/H aspect ratio for crops (e.g., 1.0 for square). "
+                             "Overrides --square if both specified.")
     args = parser.parse_args()
+
+    # Determine fixed aspect ratio
+    fixed_aspect_ratio = args.aspect_ratio
+    if fixed_aspect_ratio is None and args.square:
+        fixed_aspect_ratio = 1.0
 
     generate_crop_dataset(
         data_dir=args.data_dir,
@@ -394,6 +409,7 @@ def main():
         crop_expand=args.crop_expand,
         n_folds=args.n_folds,
         min_crop_size=args.min_crop_size,
+        fixed_aspect_ratio=fixed_aspect_ratio,
     )
 
 

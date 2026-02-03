@@ -293,7 +293,8 @@ def run_ultrasam_inference(model, image_bgr, prompts, prompt_type, device,
 
 
 def run_ultrasam_inference_crop(model, image_bgr, prompts, prompt_type, device,
-                                crop_expand=0.5, target_size=1024):
+                                crop_expand=0.5, target_size=1024,
+                                fixed_aspect_ratio=None):
     """Run UltraSAM inference on a cropped region around the prediction bbox.
 
     Steps:
@@ -302,6 +303,9 @@ def run_ultrasam_inference_crop(model, image_bgr, prompts, prompt_type, device,
         3. Transform prompts: orig space -> crop space
         4. Run standard inference on the crop (ori_shape = crop dimensions)
         5. Paste crop mask back into full-size canvas
+
+    Args:
+        fixed_aspect_ratio: If provided, enforce this W/H ratio for crops (1.0 for square).
 
     Returns: binary mask (np.uint8) at full original resolution.
     """
@@ -314,7 +318,8 @@ def run_ultrasam_inference_crop(model, image_bgr, prompts, prompt_type, device,
 
     # Compute crop region
     crop_box = compute_crop_box(
-        prompts["box"], full_h, full_w, expand_ratio=crop_expand)
+        prompts["box"], full_h, full_w, expand_ratio=crop_expand,
+        fixed_aspect_ratio=fixed_aspect_ratio)
     cx1, cy1, cx2, cy2 = crop_box
     crop_h = cy2 - cy1
     crop_w = cx2 - cx1
@@ -359,8 +364,18 @@ def main():
     parser.add_argument("--crop_expand", type=float, default=0.5,
                         help="Expand crop region by this ratio beyond the prompt box "
                              "(default: 0.5, i.e. 50%% of box dim on each side)")
+    parser.add_argument("--square", action="store_true",
+                        help="Force square crops (W/H ratio = 1.0)")
+    parser.add_argument("--aspect_ratio", type=float, default=None,
+                        help="Fixed W/H aspect ratio for crops (e.g., 1.0 for square). "
+                             "Overrides --square if both specified.")
     parser.add_argument("--device", type=str, default="cuda:0")
     args = parser.parse_args()
+
+    # Determine fixed aspect ratio
+    fixed_aspect_ratio = args.aspect_ratio
+    if fixed_aspect_ratio is None and args.square:
+        fixed_aspect_ratio = 1.0
 
     # Resolve paths relative to project root
     config_path = os.path.join(ROOT_DIR, args.ultrasam_config) \
@@ -371,7 +386,11 @@ def main():
     print(f"Loading UltraSAM from {config_path}")
     print(f"Prompt type: {args.prompt_type}")
     if args.crop:
-        print(f"Crop mode: ON (crop_expand={args.crop_expand})")
+        crop_info = f"Crop mode: ON (crop_expand={args.crop_expand}"
+        if fixed_aspect_ratio is not None:
+            crop_info += f", aspect_ratio={fixed_aspect_ratio}"
+        crop_info += ")"
+        print(crop_info)
     model, cfg = load_ultrasam_model(config_path, ckpt_path, args.device)
 
     # Process each fold
@@ -412,6 +431,7 @@ def main():
                     mask = run_ultrasam_inference_crop(
                         model, image_bgr, prompts, args.prompt_type,
                         args.device, crop_expand=args.crop_expand,
+                        fixed_aspect_ratio=fixed_aspect_ratio,
                     )
                 else:
                     mask = run_ultrasam_inference(

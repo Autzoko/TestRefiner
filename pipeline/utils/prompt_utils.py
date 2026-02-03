@@ -60,6 +60,7 @@ def compute_crop_box(
     image_w: int,
     expand_ratio: float = 0.5,
     min_crop_size: int = 64,
+    fixed_aspect_ratio: Optional[float] = None,
 ) -> Tuple[int, int, int, int]:
     """Compute a crop region around a bounding box with expansion.
 
@@ -69,6 +70,8 @@ def compute_crop_box(
         image_w: Full image width.
         expand_ratio: Fraction of box width/height to expand on each side.
         min_crop_size: Minimum crop dimension (prevents degenerate tiny crops).
+        fixed_aspect_ratio: If provided, enforce this W/H ratio for the crop.
+            Use 1.0 for square crops. None means no constraint.
 
     Returns:
         (cx1, cy1, cx2, cy2) — crop box clamped to image bounds.
@@ -80,13 +83,66 @@ def compute_crop_box(
     if bw <= 0 or bh <= 0:
         return (0, 0, image_w, image_h)
 
+    # Compute initial expanded crop
     dx = bw * expand_ratio
     dy = bh * expand_ratio
 
-    cx1 = int(max(0, x1 - dx))
-    cy1 = int(max(0, y1 - dy))
-    cx2 = int(min(image_w, x2 + dx))
-    cy2 = int(min(image_h, y2 + dy))
+    cx1 = x1 - dx
+    cy1 = y1 - dy
+    cx2 = x2 + dx
+    cy2 = y2 + dy
+
+    crop_w = cx2 - cx1
+    crop_h = cy2 - cy1
+
+    # Enforce fixed aspect ratio if specified
+    if fixed_aspect_ratio is not None and fixed_aspect_ratio > 0:
+        target_ratio = fixed_aspect_ratio  # W/H
+        current_ratio = crop_w / crop_h
+
+        center_x = (cx1 + cx2) / 2
+        center_y = (cy1 + cy2) / 2
+
+        if current_ratio < target_ratio:
+            # Need to increase width
+            new_w = crop_h * target_ratio
+            cx1 = center_x - new_w / 2
+            cx2 = center_x + new_w / 2
+        else:
+            # Need to increase height
+            new_h = crop_w / target_ratio
+            cy1 = center_y - new_h / 2
+            cy2 = center_y + new_h / 2
+
+        crop_w = cx2 - cx1
+        crop_h = cy2 - cy1
+
+    # Clamp to image bounds while trying to maintain aspect ratio
+    cx1 = int(max(0, cx1))
+    cy1 = int(max(0, cy1))
+    cx2 = int(min(image_w, cx2))
+    cy2 = int(min(image_h, cy2))
+
+    # After clamping, re-check and adjust to maintain aspect ratio if needed
+    if fixed_aspect_ratio is not None and fixed_aspect_ratio > 0:
+        crop_w = cx2 - cx1
+        crop_h = cy2 - cy1
+        current_ratio = crop_w / crop_h if crop_h > 0 else 1.0
+
+        # If clamping broke the ratio, shrink the larger dimension
+        if abs(current_ratio - fixed_aspect_ratio) > 0.01:
+            if current_ratio > fixed_aspect_ratio:
+                # Width is too large, shrink it
+                new_w = int(crop_h * fixed_aspect_ratio)
+                center_x = (cx1 + cx2) // 2
+                cx1 = max(0, center_x - new_w // 2)
+                cx2 = min(image_w, cx1 + new_w)
+            else:
+                # Height is too large, shrink it
+                new_h = int(crop_w / fixed_aspect_ratio)
+                center_y = (cy1 + cy2) // 2
+                cy1 = max(0, center_y - new_h // 2)
+                cy2 = min(image_h, cy1 + new_h)
 
     # Enforce minimum crop size
     if (cx2 - cx1) < min_crop_size:

@@ -14,7 +14,8 @@ A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation
 | 5 | `pipeline/05_infer_ultrasam.py` | Run UltraSAM with generated prompts (supports crop mode) |
 | 6 | `pipeline/06_compare.py` | Compare metrics and optionally visualize results |
 | 7 | `pipeline/07_generate_crop_data.py` | Generate cropped training data for UltraSAM finetuning |
-| 8 | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data |
+| 8a | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data (full finetuning) |
+| 8b | `pipeline/08_finetune_ultrasam_lora.py` | Finetune UltraSAM with LoRA + optional FFN training |
 
 ## Data Flow
 
@@ -65,7 +66,8 @@ UltraRefiner/
 │   ├── 05_infer_ultrasam.py
 │   ├── 06_compare.py
 │   ├── 07_generate_crop_data.py        # Generate cropped data for finetuning
-│   ├── 08_finetune_ultrasam_standalone.py  # Finetune UltraSAM
+│   ├── 08_finetune_ultrasam_standalone.py  # Finetune UltraSAM (full)
+│   ├── 08_finetune_ultrasam_lora.py    # Finetune UltraSAM with LoRA
 │   ├── run_crop_finetune.sh            # Convenience script for full pipeline
 │   └── utils/
 │       ├── metrics.py          # Dice, IoU, HD95
@@ -215,6 +217,14 @@ python pipeline/05_infer_ultrasam.py \
     --prompt_type box \
     --crop --crop_expand 0.5 \
     --device cuda:0
+
+# Crop mode with fixed square aspect ratio
+python pipeline/05_infer_ultrasam.py \
+    ... --crop --crop_expand 0.5 --square
+
+# Crop mode with custom aspect ratio (W/H)
+python pipeline/05_infer_ultrasam.py \
+    ... --crop --crop_expand 0.5 --aspect_ratio 1.5
 ```
 
 **Prompt modes:**
@@ -228,6 +238,12 @@ python pipeline/05_infer_ultrasam.py \
 **Crop mode (`--crop`):**
 
 Instead of feeding the full image to UltraSAM, crops a region around TransUNet's predicted bounding box and feeds only the crop. This gives UltraSAM higher effective resolution on the region of interest. The `--crop_expand` ratio (default 0.5) controls how much context beyond the prompt box is included — e.g. 0.5 adds 50% of the box width/height on each side. Crop mode can be combined with any `--prompt_type`.
+
+**Fixed aspect ratio options:**
+- `--square`: Force square crops (W/H = 1.0)
+- `--aspect_ratio N`: Force fixed W/H ratio (e.g., 1.5 for 3:2 crops)
+
+When a fixed aspect ratio is specified, the crop region is expanded from its center to satisfy the ratio while staying within image bounds. This ensures consistent input shapes during finetuning and inference.
 
 Coordinate transform chain in crop mode:
 ```
@@ -468,3 +484,111 @@ python pipeline/06_compare.py \
 4. **Monitor validation metrics**: The script saves `best.pth` based on validation IoU. Use `--val_interval` to control validation frequency.
 
 5. **Data augmentation**: The standalone script applies random horizontal flips during training. The mmengine-based script uses the full UltraSAM augmentation pipeline.
+
+---
+
+## LoRA Finetuning (Parameter-Efficient)
+
+For efficient finetuning with minimal GPU memory, use LoRA (Low-Rank Adaptation). This method trains only small adapter matrices in the ViT backbone while keeping the original weights frozen.
+
+### LoRA Quick Start
+
+```bash
+# 1. Generate cropped data with fixed square aspect ratio
+python pipeline/07_generate_crop_data.py \
+    --data_dir outputs/preprocessed/busi \
+    --output_dir outputs/crop_data_square/busi \
+    --crop_expand 0.5 --square \
+    --n_folds 5
+
+# 2. LoRA-only finetuning (most efficient)
+python pipeline/08_finetune_ultrasam_lora.py \
+    --data_dir outputs/crop_data_square/busi/combined \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/finetuned_ultrasam_lora/busi \
+    --lora_rank 16 \
+    --epochs 50
+
+# 3. LoRA + FFN training (better adaptation)
+python pipeline/08_finetune_ultrasam_lora.py \
+    --data_dir outputs/crop_data_square/busi/combined \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/finetuned_ultrasam_lora_ffn/busi \
+    --lora_rank 16 \
+    --train_ffn \
+    --epochs 50
+
+# 4. Inference with LoRA model
+python pipeline/05_infer_ultrasam.py \
+    --prompt_dir outputs/prompts/busi \
+    --image_dir outputs/preprocessed/busi/images_fullres \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt outputs/finetuned_ultrasam_lora/busi/best.pth \
+    --output_dir outputs/ultrasam_preds_lora/busi \
+    --prompt_type box --crop --crop_expand 0.5 --square
+```
+
+### LoRA Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--lora_rank` | 16 | LoRA rank (higher = more capacity, more params) |
+| `--lora_alpha` | 16 | LoRA scaling factor (typically equal to rank) |
+| `--lora_dropout` | 0.1 | Dropout rate for LoRA layers |
+
+### What to Train with LoRA
+
+| Flag | Effect | Params Added |
+|------|--------|--------------|
+| (default) | LoRA on qkv projections only | ~1.2M |
+| `--train_ffn` | Also train FFN (mlp) layers in backbone | ~15M |
+| `--train_decoder` | Also train transformer decoder | ~4M |
+| `--train_mask_head` | Also train mask prediction head | ~4M |
+
+**Recommended configurations:**
+
+1. **LoRA only** (smallest footprint, ~1% of model params):
+   ```bash
+   python pipeline/08_finetune_ultrasam_lora.py ... --lora_rank 16
+   ```
+
+2. **LoRA + FFN** (recommended for domain adaptation):
+   ```bash
+   python pipeline/08_finetune_ultrasam_lora.py ... --lora_rank 16 --train_ffn
+   ```
+
+3. **LoRA + FFN + decoder** (for significant domain shift):
+   ```bash
+   python pipeline/08_finetune_ultrasam_lora.py ... --lora_rank 16 --train_ffn --train_decoder
+   ```
+
+### LoRA vs Full Finetuning
+
+| Aspect | LoRA | Full Finetuning |
+|--------|------|-----------------|
+| Trainable params | ~1-15M (~1-15%) | ~100M (100%) |
+| GPU memory | Low | High |
+| Training speed | Fast | Slow |
+| Risk of catastrophic forgetting | Low | Higher |
+| Best for | Domain adaptation | Large dataset, significant distribution shift |
+
+### Fixed Aspect Ratio for Consistent Crops
+
+When using LoRA finetuning, it's recommended to use a fixed aspect ratio for crops to ensure consistent input shapes:
+
+```bash
+# Generate square crops
+python pipeline/07_generate_crop_data.py ... --square
+
+# Or specify custom W/H ratio
+python pipeline/07_generate_crop_data.py ... --aspect_ratio 1.0
+
+# Use same settings for inference
+python pipeline/05_infer_ultrasam.py ... --crop --square
+```
+
+The aspect ratio is enforced by:
+1. Computing the initial crop box (bbox + expansion)
+2. Expanding the smaller dimension to match the target ratio
+3. Clamping to image bounds
+4. If clamping breaks the ratio, shrinking the larger dimension
