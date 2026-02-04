@@ -18,6 +18,8 @@ A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation
 | 8b | `pipeline/08_finetune_ultrasam_lora.py` | Finetune UltraSAM with LoRA + optional FFN training |
 | 9 | `pipeline/09_infer_ultrasam_abus.py` | Direct UltraSAM inference on ABUS dataset |
 | 10 | `pipeline/10_generate_crop_data_abus.py` | Generate crop data from ABUS for finetuning |
+| - | `pipeline/02_train_transunet_abus.py` | Train TransUNet on ABUS (predefined splits) |
+| - | `pipeline/03_infer_transunet_abus.py` | TransUNet inference on ABUS |
 
 ## Data Flow
 
@@ -695,7 +697,30 @@ python pipeline/01_preprocess.py \
     --dataset abus \
     --data_dir /path/to/ABUS \
     --output_dir outputs/preprocessed/abus
+```
 
+### TransUNet on ABUS
+
+```bash
+# Train TransUNet
+python pipeline/02_train_transunet_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --output_dir outputs/transunet_models/abus \
+    --max_epochs 1000 --batch_size 4 --base_lr 0.01 \
+    --device cuda:0
+
+# Run TransUNet inference on test set
+python pipeline/03_infer_transunet_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --model_path outputs/transunet_models/abus/best.pth \
+    --output_dir outputs/transunet_preds/abus \
+    --split test \
+    --device cuda:0
+```
+
+### UltraSAM on ABUS (Direct Inference)
+
+```bash
 # 2. Direct inference (without finetuning) on test set
 python pipeline/09_infer_ultrasam_abus.py \
     --data_dir outputs/preprocessed/abus \
@@ -780,6 +805,8 @@ outputs/ultrasam_preds/abus/
 |--------|------|-------------|
 | Splits | Predefined Train/Val/Test | K-fold CV |
 | Preprocessing | `01_preprocess.py --dataset abus` | `01_preprocess.py --dataset busi/busbra` |
-| Inference | `09_infer_ultrasam_abus.py` | `05_infer_ultrasam.py` |
+| TransUNet train | `02_train_transunet_abus.py` | `02_train_transunet.py` |
+| TransUNet infer | `03_infer_transunet_abus.py` | `03_infer_transunet.py` |
+| UltraSAM infer | `09_infer_ultrasam_abus.py` | `05_infer_ultrasam.py` |
 | Crop data | `10_generate_crop_data_abus.py` | `07_generate_crop_data.py` |
 | Finetuning | Same (`08_finetune_ultrasam_lora.py`) | Same |
