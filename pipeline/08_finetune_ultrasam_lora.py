@@ -3,15 +3,11 @@
 This script uses LoRA (Low-Rank Adaptation) for efficient finetuning of the
 UltraSAM backbone, with options to also train the FFN layers.
 
-LoRA Configuration:
-    - Targets: qkv projections in the ViT backbone
-    - Default rank: 16, alpha: 16
-    - Can optionally train FFN layers in backbone (--train_ffn)
-
 Usage:
     # LoRA only (most efficient)
     python pipeline/08_finetune_ultrasam_lora.py \
         --data_dir outputs/crop_data/busi/combined \
+        --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
         --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
         --output_dir outputs/finetuned_ultrasam_lora/busi \
         --lora_rank 16 \
@@ -20,6 +16,7 @@ Usage:
     # LoRA + FFN training
     python pipeline/08_finetune_ultrasam_lora.py \
         --data_dir outputs/crop_data/busi/combined \
+        --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
         --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
         --output_dir outputs/finetuned_ultrasam_lora/busi \
         --lora_rank 16 \
@@ -29,6 +26,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -50,6 +48,94 @@ if ULTRASAM_ROOT not in sys.path:
     sys.path.insert(0, ULTRASAM_ROOT)
 
 from utils.prompt_utils import mask_to_bbox, mask_to_centroid, transform_coords
+
+
+class LoRALayer(nn.Module):
+    """Low-Rank Adaptation layer for linear transformations."""
+
+    def __init__(self, in_features: int, out_features: int, rank: int = 16, alpha: float = 16.0):
+        super().__init__()
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+
+        # LoRA matrices
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+
+        # Initialize A with Kaiming, B with zeros
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x @ A^T @ B^T * scaling
+        return (x @ self.lora_A.T @ self.lora_B.T) * self.scaling
+
+
+class LoRALinear(nn.Module):
+    """Linear layer with LoRA adaptation."""
+
+    def __init__(self, original_linear: nn.Linear, rank: int = 16, alpha: float = 16.0):
+        super().__init__()
+        self.original = original_linear
+        self.lora = LoRALayer(
+            original_linear.in_features,
+            original_linear.out_features,
+            rank=rank,
+            alpha=alpha
+        )
+        # Freeze original weights
+        for param in self.original.parameters():
+            param.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.original(x) + self.lora(x)
+
+
+def inject_lora_layers(model: nn.Module, rank: int = 16, alpha: float = 16.0, target_modules: List[str] = None):
+    """Inject LoRA layers into the model's attention modules.
+
+    Args:
+        model: The model to modify
+        rank: LoRA rank
+        alpha: LoRA alpha scaling
+        target_modules: List of module name patterns to target (default: qkv projections)
+    """
+    if target_modules is None:
+        target_modules = ['qkv', 'proj']  # Target attention projections
+
+    lora_count = 0
+
+    def _inject_lora(parent_module, name, module):
+        nonlocal lora_count
+        if isinstance(module, nn.Linear):
+            for target in target_modules:
+                if target in name:
+                    lora_linear = LoRALinear(module, rank=rank, alpha=alpha)
+                    setattr(parent_module, name.split('.')[-1], lora_linear)
+                    lora_count += 1
+                    return True
+        return False
+
+    # Find and replace linear layers in backbone
+    if hasattr(model, 'backbone'):
+        for name, module in model.backbone.named_modules():
+            if isinstance(module, nn.Linear):
+                for target in target_modules:
+                    if target in name:
+                        # Get parent module
+                        parts = name.split('.')
+                        parent = model.backbone
+                        for part in parts[:-1]:
+                            parent = getattr(parent, part)
+                        # Replace with LoRA version
+                        lora_linear = LoRALinear(module, rank=rank, alpha=alpha)
+                        setattr(parent, parts[-1], lora_linear)
+                        lora_count += 1
+                        break
+
+    print(f"Injected {lora_count} LoRA layers (rank={rank}, alpha={alpha})")
+    return lora_count
 
 
 class CropDataset(Dataset):
@@ -146,21 +232,19 @@ class CropDataset(Dataset):
 
         orig_h, orig_w = image_bgr.shape[:2]
 
-        if self.augment and np.random.random() > 0.5:
-            image_bgr = cv2.flip(image_bgr, 1)
-            for ann in annotations:
-                if "segmentation" in ann:
-                    ann["_flip_h"] = True
-
-        img_tensor, scale, new_h, new_w = self._preprocess_image(image_bgr)
-
+        # Get annotation
         ann = annotations[0]
         mask = self._decode_rle(ann["segmentation"])
-        if ann.get("_flip_h", False):
+
+        # Augmentation
+        if self.augment and np.random.random() > 0.5:
+            image_bgr = cv2.flip(image_bgr, 1)
             mask = cv2.flip(mask, 1)
 
+        img_tensor, scale, new_h, new_w = self._preprocess_image(image_bgr)
         mask_tensor = self._preprocess_mask(mask, scale, new_h, new_w)
 
+        # Generate prompts from mask
         mask_binary = (mask > 0).astype(np.uint8)
         bbox = mask_to_bbox(mask_binary)
         if bbox is None:
@@ -205,27 +289,8 @@ def collate_fn(batch: List[Dict]) -> Dict:
     }
 
 
-def build_lora_model(
-    base_ckpt: str,
-    lora_rank: int = 16,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.1,
-    lora_targets: List[str] = None,
-    device: str = "cuda:0",
-):
-    """Build UltraSAM model with LoRA on the backbone.
-
-    Args:
-        base_ckpt: Path to pretrained UltraSAM checkpoint.
-        lora_rank: LoRA rank (default: 16).
-        lora_alpha: LoRA alpha scaling factor (default: 16).
-        lora_dropout: Dropout rate for LoRA layers (default: 0.1).
-        lora_targets: List of target layer types for LoRA (default: ['qkv']).
-        device: Device to load model on.
-
-    Returns:
-        model, cfg tuple.
-    """
+def build_ultrasam_model(config_path: str, ckpt_path: str, device: str = "cuda:0"):
+    """Build and load standard UltraSAM model."""
     from mmengine.config import Config
     from mmengine.runner import load_checkpoint
     from mmdet.utils import register_all_modules
@@ -233,14 +298,7 @@ def build_lora_model(
 
     register_all_modules()
 
-    if lora_targets is None:
-        lora_targets = [dict(type='qkv')]
-
-    # Build config for LoRA model
-    # We use the sam_lora.py config as reference
-    base_config_path = os.path.join(
-        ULTRASAM_ROOT, "configs/_base_/models/sam_mask_refinement.py")
-    cfg = Config.fromfile(base_config_path)
+    cfg = Config.fromfile(config_path)
 
     # Process custom imports
     if hasattr(cfg, "custom_imports"):
@@ -261,56 +319,12 @@ def build_lora_model(
     except ImportError as e:
         print(f"Warning: Could not apply MonkeyPatch: {e}")
 
-    # Modify backbone config to use LoRA wrapper
-    # Note: We don't use _delete_=True here since we're directly assigning,
-    # not merging with config inheritance
-    cfg.model.backbone = dict(
-        type='mmpretrain.LoRAModel',
-        module=dict(
-            type='mmpretrain.ViTSAM',
-            arch='base',
-            img_size=1024,
-            patch_size=16,
-            out_channels=256,
-            use_abs_pos=True,
-            use_rel_pos=True,
-            window_size=14,
-        ),
-        alpha=lora_alpha,
-        rank=lora_rank,
-        drop_rate=lora_dropout,
-        targets=lora_targets,
-    )
-
     # Build model
     model = MODELS.build(cfg.model)
 
-    # Load pretrained weights (need to handle LoRA wrapper)
-    # First load the base checkpoint
-    ckpt = torch.load(base_ckpt, map_location="cpu")
-    if "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    else:
-        state_dict = ckpt
-
-    # Filter and rename keys for the LoRA-wrapped backbone
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith("backbone."):
-            # Map backbone.X to backbone.module.X for LoRA wrapper
-            new_key = k.replace("backbone.", "backbone.module.")
-            new_state_dict[new_key] = v
-        else:
-            new_state_dict[k] = v
-
-    # Load with strict=False to allow missing LoRA parameters
-    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
-    print(f"Loaded checkpoint: {len(missing)} missing, {len(unexpected)} unexpected keys")
-
-    # Filter out expected missing keys (LoRA parameters)
-    unexpected_non_lora = [k for k in unexpected if 'lora' not in k.lower()]
-    if unexpected_non_lora:
-        print(f"Warning: Unexpected non-LoRA keys: {unexpected_non_lora[:5]}...")
+    # Load checkpoint
+    load_checkpoint(model, ckpt_path, map_location="cpu")
+    print(f"Loaded checkpoint from {ckpt_path}")
 
     model = model.to(device)
     return model, cfg
@@ -323,59 +337,49 @@ def apply_freeze_strategy(
     train_decoder: bool = False,
     train_mask_head: bool = False,
 ):
-    """Apply freezing strategy for LoRA finetuning.
-
-    Args:
-        model: UltraSAM model with LoRA backbone.
-        train_lora: Train LoRA parameters (default: True).
-        train_ffn: Also train FFN layers in backbone (default: False).
-        train_decoder: Train transformer decoder (default: False).
-        train_mask_head: Train mask prediction head (default: False).
-    """
+    """Apply freezing strategy for LoRA finetuning."""
     print("\nApplying freeze strategy...")
 
     # First freeze everything
     for param in model.parameters():
         param.requires_grad = False
 
-    trainable_count = 0
+    trainable_params = 0
 
-    # Unfreeze LoRA parameters in backbone
-    if train_lora and hasattr(model, 'backbone'):
-        for name, param in model.backbone.named_parameters():
-            if 'lora_' in name:
+    # Unfreeze LoRA parameters
+    if train_lora:
+        for name, param in model.named_parameters():
+            if 'lora' in name.lower():
                 param.requires_grad = True
-                trainable_count += param.numel()
-        print(f"  LoRA parameters: trainable")
+                trainable_params += param.numel()
+        print("  LoRA parameters: trainable")
 
     # Unfreeze FFN layers in backbone
     if train_ffn and hasattr(model, 'backbone'):
         for name, param in model.backbone.named_parameters():
-            # FFN in ViT is typically named 'mlp' or 'ffn'
             if 'mlp' in name or 'ffn' in name:
                 param.requires_grad = True
-                trainable_count += param.numel()
-        print(f"  Backbone FFN: trainable")
+                trainable_params += param.numel()
+        print("  Backbone FFN: trainable")
 
     # Unfreeze decoder
     if train_decoder and hasattr(model, 'decoder'):
         for param in model.decoder.parameters():
             param.requires_grad = True
-            trainable_count += param.numel()
-        print(f"  Decoder: trainable")
+            trainable_params += param.numel()
+        print("  Decoder: trainable")
 
     # Unfreeze mask head
     if train_mask_head and hasattr(model, 'bbox_head'):
         for param in model.bbox_head.parameters():
             param.requires_grad = True
-            trainable_count += param.numel()
-        print(f"  Mask head: trainable")
+            trainable_params += param.numel()
+        print("  Mask head: trainable")
 
-    # Count total
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\nParameters: {trainable_params:,} trainable / {total_params:,} total "
-          f"({100*trainable_params/total_params:.2f}%)")
+    trainable_final = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\nParameters: {trainable_final:,} trainable / {total_params:,} total "
+          f"({100*trainable_final/total_params:.2f}%)")
 
 
 def build_data_sample(batch: Dict, device: str, target_size: int = 1024):
@@ -483,28 +487,47 @@ def validate(model, dataloader, device):
             results = model(**data, mode="predict")
 
             for i, result in enumerate(results):
-                if hasattr(result, "pred_instances") and hasattr(result.pred_instances, "masks"):
-                    pred_mask = result.pred_instances.masks[0].float()
-                    gt_mask = masks[i]
+                gt_mask = masks[i]
 
-                    if pred_mask.shape != gt_mask.shape:
-                        pred_mask = F.interpolate(
-                            pred_mask.unsqueeze(0).unsqueeze(0),
-                            size=gt_mask.shape,
-                            mode="nearest",
-                        ).squeeze()
+                # Try to get prediction mask
+                pred_mask = None
+                if hasattr(result, "pred_instances"):
+                    pred_inst = result.pred_instances
+                    if hasattr(pred_inst, "masks") and len(pred_inst.masks) > 0:
+                        pred_mask = pred_inst.masks[0]
+                        if isinstance(pred_mask, torch.Tensor):
+                            pred_mask = pred_mask.float()
+                        else:
+                            pred_mask = torch.from_numpy(pred_mask).float().to(device)
 
-                    intersection = (pred_mask * gt_mask).sum()
-                    union = pred_mask.sum() + gt_mask.sum() - intersection
-                    iou = intersection / (union + 1e-6)
-                    total_iou += iou.item()
+                if pred_mask is None:
+                    # No valid prediction
+                    continue
 
-                    dice = (2 * intersection) / (pred_mask.sum() + gt_mask.sum() + 1e-6)
-                    total_dice += dice.item()
+                # Resize if needed
+                if pred_mask.shape != gt_mask.shape:
+                    pred_mask = F.interpolate(
+                        pred_mask.unsqueeze(0).unsqueeze(0).float(),
+                        size=gt_mask.shape,
+                        mode="nearest",
+                    ).squeeze()
 
-                    num_samples += 1
+                # Ensure both are on same device and binarized
+                pred_mask = (pred_mask > 0.5).float().to(device)
+                gt_mask = (gt_mask > 0.5).float().to(device)
+
+                intersection = (pred_mask * gt_mask).sum()
+                union = pred_mask.sum() + gt_mask.sum() - intersection
+                iou = intersection / (union + 1e-6)
+                total_iou += iou.item()
+
+                dice = (2 * intersection) / (pred_mask.sum() + gt_mask.sum() + 1e-6)
+                total_dice += dice.item()
+
+                num_samples += 1
 
     if num_samples == 0:
+        print("  Warning: No valid predictions during validation")
         return {"iou": 0, "dice": 0}
 
     return {"iou": total_iou / num_samples, "dice": total_dice / num_samples}
@@ -512,11 +535,11 @@ def validate(model, dataloader, device):
 
 def finetune_ultrasam_lora(
     data_dir: str,
+    ultrasam_config: str,
     ultrasam_ckpt: str,
     output_dir: str,
     lora_rank: int = 16,
     lora_alpha: int = 16,
-    lora_dropout: float = 0.1,
     train_ffn: bool = False,
     train_decoder: bool = False,
     train_mask_head: bool = False,
@@ -529,10 +552,16 @@ def finetune_ultrasam_lora(
     """Finetune UltraSAM with LoRA."""
     os.makedirs(output_dir, exist_ok=True)
 
-    # Build model with LoRA
-    print(f"\nBuilding LoRA model (rank={lora_rank}, alpha={lora_alpha})")
-    model, cfg = build_lora_model(
-        ultrasam_ckpt, lora_rank, lora_alpha, lora_dropout, device=device)
+    # Build standard model
+    print(f"\nBuilding UltraSAM model...")
+    model, cfg = build_ultrasam_model(ultrasam_config, ultrasam_ckpt, device)
+
+    # Inject LoRA layers
+    print(f"\nInjecting LoRA layers (rank={lora_rank}, alpha={lora_alpha})")
+    lora_count = inject_lora_layers(model, rank=lora_rank, alpha=lora_alpha)
+
+    if lora_count == 0:
+        print("Warning: No LoRA layers were injected. Falling back to regular finetuning.")
 
     # Apply freeze strategy
     apply_freeze_strategy(
@@ -572,16 +601,26 @@ def finetune_ultrasam_lora(
             val_dataset.img_to_anns[img_id].append(ann)
         val_dataset.image_ids = list(val_dataset.img_to_anns.keys())
 
-        val_loader = DataLoader(
-            val_dataset, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
+        if len(val_dataset.image_ids) > 0:
+            val_loader = DataLoader(
+                val_dataset, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
+            print(f"Validation set: {len(val_dataset.image_ids)} samples")
+        else:
+            print("No validation samples found")
 
     # Setup optimizer (only for trainable parameters)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"\nTrainable parameters: {len(trainable_params)} tensors")
+
+    if len(trainable_params) == 0:
+        print("Error: No trainable parameters! Check freeze strategy.")
+        return
+
     optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
 
     # Training loop
-    print(f"\nStarting LoRA finetuning for {epochs} epochs")
+    print(f"\nStarting finetuning for {epochs} epochs")
     best_val_iou = 0
 
     for epoch in range(epochs):
@@ -593,20 +632,19 @@ def finetune_ultrasam_lora(
         train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
         print(f"Train Loss: {train_loss:.4f}")
 
+        # Validate
         if val_loader is not None and (epoch + 1) % 5 == 0:
             val_metrics = validate(model, val_loader, device)
             print(f"Val - IoU: {val_metrics['iou']:.4f}, Dice: {val_metrics['dice']:.4f}")
 
             if val_metrics["iou"] > best_val_iou:
                 best_val_iou = val_metrics["iou"]
-                # Save only LoRA weights + other trainable weights
                 save_dict = {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "lora_config": {
                         "rank": lora_rank,
                         "alpha": lora_alpha,
-                        "dropout": lora_dropout,
                     },
                     "val_iou": val_metrics["iou"],
                 }
@@ -615,6 +653,7 @@ def finetune_ultrasam_lora(
 
         scheduler.step()
 
+        # Save checkpoint periodically
         if (epoch + 1) % 10 == 0:
             torch.save({
                 "epoch": epoch,
@@ -629,7 +668,7 @@ def finetune_ultrasam_lora(
     torch.save({
         "epoch": epochs,
         "model_state_dict": model.state_dict(),
-        "lora_config": {"rank": lora_rank, "alpha": lora_alpha, "dropout": lora_dropout},
+        "lora_config": {"rank": lora_rank, "alpha": lora_alpha},
     }, os.path.join(output_dir, "final.pth"))
 
     print(f"\nTraining complete. Models saved to: {output_dir}")
@@ -641,6 +680,8 @@ def main():
 
     parser.add_argument("--data_dir", type=str, required=True,
                         help="Directory with cropped data")
+    parser.add_argument("--ultrasam_config", type=str, required=True,
+                        help="Path to UltraSAM config file")
     parser.add_argument("--ultrasam_ckpt", type=str, required=True,
                         help="Path to UltraSAM checkpoint")
     parser.add_argument("--output_dir", type=str, required=True,
@@ -651,8 +692,6 @@ def main():
                         help="LoRA rank (default: 16)")
     parser.add_argument("--lora_alpha", type=int, default=16,
                         help="LoRA alpha (default: 16)")
-    parser.add_argument("--lora_dropout", type=float, default=0.1,
-                        help="LoRA dropout (default: 0.1)")
 
     # What to train
     parser.add_argument("--train_ffn", action="store_true",
@@ -677,16 +716,19 @@ def main():
 
     args = parser.parse_args()
 
+    # Resolve paths
+    config_path = os.path.join(ROOT_DIR, args.ultrasam_config) \
+        if not os.path.isabs(args.ultrasam_config) else args.ultrasam_config
     ckpt_path = os.path.join(ROOT_DIR, args.ultrasam_ckpt) \
         if not os.path.isabs(args.ultrasam_ckpt) else args.ultrasam_ckpt
 
     finetune_ultrasam_lora(
         data_dir=args.data_dir,
+        ultrasam_config=config_path,
         ultrasam_ckpt=ckpt_path,
         output_dir=args.output_dir,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
         train_ffn=args.train_ffn,
         train_decoder=args.train_decoder,
         train_mask_head=args.train_mask_head,
