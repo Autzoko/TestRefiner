@@ -494,17 +494,17 @@ def analyze_point_prompts(
             dice_gt = compute_dice(pred_gt_point, gt_mask)
             dice_transunet = compute_dice(pred_transunet_point, gt_mask)
 
-            # Store results
+            # Store results (convert numpy types to native Python for JSON serialization)
             result = {
                 "case": case_name,
                 "fold": fold_name,
-                "gt_point": gt_point,
-                "transunet_point": transunet_point,
-                "point_in_lesion": point_in_lesion,
-                "distance": distance,
-                "dice_gt_point": dice_gt,
-                "dice_transunet_point": dice_transunet,
-                "dice_diff": dice_gt - dice_transunet,
+                "gt_point": [int(x) for x in gt_point],
+                "transunet_point": [int(x) for x in transunet_point],
+                "point_in_lesion": bool(point_in_lesion),
+                "distance": float(distance),
+                "dice_gt_point": float(dice_gt),
+                "dice_transunet_point": float(dice_transunet),
+                "dice_diff": float(dice_gt - dice_transunet),
             }
             all_results.append(result)
 
@@ -535,10 +535,10 @@ def analyze_point_prompts(
 
                 perturbation_results[sigma].append({
                     "case": case_name,
-                    "original_dice": dice_gt,
-                    "perturbed_dice": dice_perturbed,
-                    "dice_drop": dice_gt - dice_perturbed,
-                    "actual_distance": compute_point_distance(gt_point, perturbed_point),
+                    "original_dice": float(dice_gt),
+                    "perturbed_dice": float(dice_perturbed),
+                    "dice_drop": float(dice_gt - dice_perturbed),
+                    "actual_distance": float(compute_point_distance(gt_point, perturbed_point)),
                 })
 
             # Create perturbation visualization
