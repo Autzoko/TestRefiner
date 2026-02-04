@@ -394,10 +394,13 @@ def analyze_point_prompts(
     fold_dirs = sorted(glob(os.path.join(transunet_pred_dir, "fold_*")))
     if not fold_dirs:
         print(f"Error: No fold directories found in {transunet_pred_dir}")
+        print(f"  Looking in: {transunet_pred_dir}")
+        print(f"  Contents: {os.listdir(transunet_pred_dir) if os.path.exists(transunet_pred_dir) else 'DIR NOT FOUND'}")
         return
 
     all_results = []
     perturbation_results = {sigma: [] for sigma in perturbation_sigmas}
+    skipped_counts = {"no_gt": 0, "no_image": 0, "load_failed": 0}
 
     for fold_dir in fold_dirs:
         fold_name = os.path.basename(fold_dir)
@@ -406,8 +409,18 @@ def analyze_point_prompts(
         gt_dir = os.path.join(fold_dir, "gt")
         pred_dir = fold_dir  # TransUNet predictions
 
+        # Check directories exist
+        if not os.path.exists(gt_dir):
+            print(f"  Warning: GT directory not found: {gt_dir}")
+            continue
+
         # Find prediction files
         pred_files = sorted(glob(os.path.join(pred_dir, "*_pred.png")))
+        print(f"  Found {len(pred_files)} prediction files")
+
+        if len(pred_files) == 0:
+            print(f"  Warning: No *_pred.png files in {pred_dir}")
+            continue
 
         for i, pred_file in enumerate(pred_files):
             if max_samples and i >= max_samples:
@@ -417,18 +430,30 @@ def analyze_point_prompts(
             gt_file = os.path.join(gt_dir, f"{case_name}_gt.png")
 
             if not os.path.exists(gt_file):
+                skipped_counts["no_gt"] += 1
+                if skipped_counts["no_gt"] <= 3:
+                    print(f"  Warning: GT not found: {gt_file}")
                 continue
 
             # Load GT mask and TransUNet prediction
             gt_mask = cv2.imread(gt_file, cv2.IMREAD_GRAYSCALE)
+            if gt_mask is None:
+                skipped_counts["load_failed"] += 1
+                continue
             gt_mask = (gt_mask > 127).astype(np.uint8)
 
             transunet_pred = cv2.imread(pred_file, cv2.IMREAD_GRAYSCALE)
+            if transunet_pred is None:
+                skipped_counts["load_failed"] += 1
+                continue
             transunet_pred = (transunet_pred > 127).astype(np.uint8)
 
             # Load original image
             img_path = os.path.join(data_dir, "images_fullres", f"{case_name}.png")
             if not os.path.exists(img_path):
+                skipped_counts["no_image"] += 1
+                if skipped_counts["no_image"] <= 3:
+                    print(f"  Warning: Image not found: {img_path}")
                 continue
 
             image_bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
@@ -510,6 +535,12 @@ def analyze_point_prompts(
             if (i + 1) % 10 == 0:
                 print(f"  Processed {i + 1}/{len(pred_files)}")
 
+    # Print skip summary
+    print(f"\nSkipped samples:")
+    print(f"  No GT file: {skipped_counts['no_gt']}")
+    print(f"  No image file: {skipped_counts['no_image']}")
+    print(f"  Load failed: {skipped_counts['load_failed']}")
+
     # Save detailed results
     results_path = os.path.join(output_dir, "point_analysis_results.json")
     with open(results_path, "w") as f:
@@ -522,6 +553,19 @@ def analyze_point_prompts(
 
     # Part I: TransUNet vs GT Point Analysis
     n_samples = len(all_results)
+
+    if n_samples == 0:
+        print("\nERROR: No samples were processed!")
+        print("Please check:")
+        print(f"  1. TransUNet predictions exist in: {transunet_pred_dir}/fold_*/")
+        print(f"  2. GT masks exist in: {transunet_pred_dir}/fold_*/gt/")
+        print(f"  3. Images exist in: {data_dir}/images_fullres/")
+        print("\nExpected file patterns:")
+        print("  - Predictions: fold_*/case_name_pred.png")
+        print("  - GT masks: fold_*/gt/case_name_gt.png")
+        print("  - Images: images_fullres/case_name.png")
+        return
+
     n_in_lesion = sum(1 for r in all_results if r["point_in_lesion"])
     avg_distance = np.mean([r["distance"] for r in all_results])
     avg_dice_gt = np.mean([r["dice_gt_point"] for r in all_results])
