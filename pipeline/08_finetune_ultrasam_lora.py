@@ -563,6 +563,9 @@ def finetune_ultrasam_lora(
     if lora_count == 0:
         print("Warning: No LoRA layers were injected. Falling back to regular finetuning.")
 
+    # Move model to device again (LoRA layers are created on CPU)
+    model = model.to(device)
+
     # Apply freeze strategy
     apply_freeze_strategy(
         model,
