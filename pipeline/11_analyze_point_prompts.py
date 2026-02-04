@@ -448,16 +448,32 @@ def analyze_point_prompts(
                 continue
             transunet_pred = (transunet_pred > 127).astype(np.uint8)
 
-            # Load original image
+            # Load original image - try PNG first, fall back to npz
             img_path = os.path.join(data_dir, "images_fullres", f"{case_name}.png")
-            if not os.path.exists(img_path):
+            npz_path = os.path.join(data_dir, f"{case_name}.npz")
+
+            image_bgr = None
+            if os.path.exists(img_path):
+                image_bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+            elif os.path.exists(npz_path):
+                # Load from npz file
+                try:
+                    npz_data = np.load(npz_path)
+                    image_rgb = npz_data["image"]  # RGB format
+                    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    if skipped_counts["load_failed"] <= 3:
+                        print(f"  Warning: Failed to load npz {npz_path}: {e}")
+                    skipped_counts["load_failed"] += 1
+                    continue
+            else:
                 skipped_counts["no_image"] += 1
                 if skipped_counts["no_image"] <= 3:
-                    print(f"  Warning: Image not found: {img_path}")
+                    print(f"  Warning: Image not found: {img_path} or {npz_path}")
                 continue
 
-            image_bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
             if image_bgr is None:
+                skipped_counts["load_failed"] += 1
                 continue
 
             # Generate points
@@ -559,11 +575,11 @@ def analyze_point_prompts(
         print("Please check:")
         print(f"  1. TransUNet predictions exist in: {transunet_pred_dir}/fold_*/")
         print(f"  2. GT masks exist in: {transunet_pred_dir}/fold_*/gt/")
-        print(f"  3. Images exist in: {data_dir}/images_fullres/")
+        print(f"  3. Images exist in: {data_dir}/images_fullres/*.png OR {data_dir}/*.npz")
         print("\nExpected file patterns:")
         print("  - Predictions: fold_*/case_name_pred.png")
         print("  - GT masks: fold_*/gt/case_name_gt.png")
-        print("  - Images: images_fullres/case_name.png")
+        print("  - Images: images_fullres/case_name.png OR case_name.npz (with 'image' key)")
         return
 
     n_in_lesion = sum(1 for r in all_results if r["point_in_lesion"])
