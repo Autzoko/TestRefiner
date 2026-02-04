@@ -1,11 +1,31 @@
-"""Train TransUNet on ABUS dataset with predefined train/val/test splits.
+"""Train TransUNet on ABUS dataset.
+
+Supports two modes:
+1. Predefined splits (default): Uses train/val directories from preprocessing
+2. K-fold cross-validation: Combines train+val data and applies KFold
 
 Usage:
+    # Predefined splits (default)
     python pipeline/02_train_transunet_abus.py \
         --data_dir outputs/preprocessed/abus \
         --output_dir outputs/transunet_models/abus \
         --max_epochs 1000 --batch_size 4 --base_lr 0.01 \
         --device cuda:0
+
+    # K-fold cross-validation (combines train + val data)
+    python pipeline/02_train_transunet_abus.py \
+        --data_dir outputs/preprocessed/abus \
+        --output_dir outputs/transunet_models/abus_kfold \
+        --n_folds 5 \
+        --max_epochs 1000 --batch_size 4 --base_lr 0.01 \
+        --device cuda:0
+
+    # Single fold only
+    python pipeline/02_train_transunet_abus.py \
+        --data_dir outputs/preprocessed/abus \
+        --output_dir outputs/transunet_models/abus_kfold \
+        --n_folds 5 --fold 0 \
+        --max_epochs 5 --device cuda:0
 """
 
 import argparse
@@ -19,6 +39,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import KFold
 
 # Add TransUNet to path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,9 +126,19 @@ def build_model(config, img_size=224, n_classes=2, pretrained_path=None):
     return model
 
 
-def train_model(train_paths, val_paths, output_dir, args):
-    """Train the model."""
+def train_fold(train_paths, val_paths, output_dir, args, fold_idx=None):
+    """Train the model for a single fold or predefined split.
+
+    Args:
+        train_paths: List of training npz file paths
+        val_paths: List of validation npz file paths
+        output_dir: Output directory for this fold/split
+        args: Command line arguments
+        fold_idx: Fold index (None for predefined split mode)
+    """
     os.makedirs(output_dir, exist_ok=True)
+
+    fold_prefix = f"Fold {fold_idx} | " if fold_idx is not None else ""
 
     # Save split info
     train_names = [os.path.splitext(os.path.basename(p))[0] for p in train_paths]
@@ -198,21 +229,21 @@ def train_model(train_paths, val_paths, output_dir, args):
                         val_count += 1
 
             val_dice = val_dice_sum / max(val_count, 1)
-            print(f"Epoch {epoch+1}/{args.max_epochs} | "
+            print(f"  {fold_prefix}Epoch {epoch+1}/{args.max_epochs} | "
                   f"Loss: {avg_loss:.4f} | Val Dice: {val_dice:.4f} | LR: {lr:.6f}")
 
             if val_dice > best_val_dice:
                 best_val_dice = val_dice
                 torch.save(model.state_dict(), os.path.join(output_dir, "best.pth"))
-                print(f"  -> New best model saved (Dice={val_dice:.4f})")
+                print(f"    -> New best model saved (Dice={val_dice:.4f})")
         else:
             if (epoch + 1) % 50 == 0:
-                print(f"Epoch {epoch+1}/{args.max_epochs} | "
+                print(f"  {fold_prefix}Epoch {epoch+1}/{args.max_epochs} | "
                       f"Loss: {avg_loss:.4f} | LR: {lr:.6f}")
 
     # Save final model
     torch.save(model.state_dict(), os.path.join(output_dir, "final.pth"))
-    print(f"\nTraining complete. Best val Dice: {best_val_dice:.4f}")
+    print(f"{fold_prefix}Training complete. Best val Dice: {best_val_dice:.4f}")
     return best_val_dice
 
 
@@ -222,6 +253,11 @@ def main():
                         help="Directory with preprocessed ABUS data (train/val/test splits)")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory for models")
+    parser.add_argument("--n_folds", type=int, default=None,
+                        help="Number of folds for cross-validation. "
+                             "If not specified, uses predefined train/val splits.")
+    parser.add_argument("--fold", type=int, default=None,
+                        help="Train only this fold (0-indexed). Requires --n_folds.")
     parser.add_argument("--max_epochs", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--base_lr", type=float, default=0.01)
@@ -231,45 +267,106 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     args = parser.parse_args()
 
-    # Check for train and val directories
+    # Check for train directory (required for both modes)
     train_dir = os.path.join(args.data_dir, "train")
     val_dir = os.path.join(args.data_dir, "val")
 
     if not os.path.isdir(train_dir):
         print(f"Error: Train directory not found: {train_dir}")
         print("Make sure to run preprocessing first:")
-        print("  python pipeline/01_preprocess.py --dataset abus --data_dir /path/to/ABUS --output_dir outputs/preprocessed/abus")
-        return
-
-    if not os.path.isdir(val_dir):
-        print(f"Error: Validation directory not found: {val_dir}")
+        print("  python pipeline/01_preprocess_abus.py --data_dir /path/to/ABUS --output_dir outputs/preprocessed/abus")
         return
 
     # Gather npz files
     train_paths = sorted(glob(os.path.join(train_dir, "*.npz")))
-    val_paths = sorted(glob(os.path.join(val_dir, "*.npz")))
 
     if not train_paths:
         print(f"Error: No training npz files found in {train_dir}")
         return
 
-    if not val_paths:
-        print(f"Error: No validation npz files found in {val_dir}")
-        return
+    # ========== K-fold cross-validation mode ==========
+    if args.n_folds is not None:
+        print(f"\n{'='*60}")
+        print(f"K-Fold Cross-Validation Mode (n_folds={args.n_folds})")
+        print(f"{'='*60}")
 
-    print(f"Found {len(train_paths)} training samples")
-    print(f"Found {len(val_paths)} validation samples")
+        # Combine train + val data for cross-validation
+        all_paths = list(train_paths)
 
-    print(f"\n{'='*60}")
-    print("Training TransUNet on ABUS dataset")
-    print(f"{'='*60}")
+        if os.path.isdir(val_dir):
+            val_paths = sorted(glob(os.path.join(val_dir, "*.npz")))
+            all_paths.extend(val_paths)
+            print(f"Combined train ({len(train_paths)}) + val ({len(val_paths)}) = {len(all_paths)} samples")
+        else:
+            print(f"Using train data only: {len(all_paths)} samples")
 
-    best_dice = train_model(train_paths, val_paths, args.output_dir, args)
+        # K-fold split
+        kf = KFold(n_splits=args.n_folds, shuffle=True, random_state=123)
+        splits = list(kf.split(all_paths))
 
-    print(f"\n{'='*60}")
-    print(f"Training Summary: Best Val Dice = {best_dice:.4f}")
-    print(f"Model saved to: {args.output_dir}")
-    print(f"{'='*60}")
+        # Determine which folds to train
+        if args.fold is not None:
+            if args.fold < 0 or args.fold >= args.n_folds:
+                print(f"Error: --fold must be in [0, {args.n_folds - 1}]")
+                return
+            folds_to_train = [args.fold]
+        else:
+            folds_to_train = list(range(args.n_folds))
+
+        results = {}
+
+        for fold_idx in folds_to_train:
+            train_idx, val_idx = splits[fold_idx]
+            fold_train_paths = [all_paths[i] for i in train_idx]
+            fold_val_paths = [all_paths[i] for i in val_idx]
+
+            print(f"\n{'='*60}")
+            print(f"Fold {fold_idx}: {len(fold_train_paths)} train, {len(fold_val_paths)} val")
+            print(f"{'='*60}")
+
+            fold_dir = os.path.join(args.output_dir, f"fold_{fold_idx}")
+            best_dice = train_fold(
+                fold_train_paths, fold_val_paths, fold_dir, args, fold_idx=fold_idx
+            )
+            results[fold_idx] = best_dice
+
+        # Summary
+        print(f"\n{'='*60}")
+        print("Training Summary:")
+        for k, v in sorted(results.items()):
+            print(f"  Fold {k}: Best Val Dice = {v:.4f}")
+        if len(results) > 1:
+            vals = list(results.values())
+            print(f"  Mean: {np.mean(vals):.4f} +/- {np.std(vals):.4f}")
+        print(f"Models saved to: {args.output_dir}")
+        print(f"{'='*60}")
+
+    # ========== Predefined splits mode (original behavior) ==========
+    else:
+        if not os.path.isdir(val_dir):
+            print(f"Error: Validation directory not found: {val_dir}")
+            print("Use --n_folds for k-fold cross-validation, or ensure val/ directory exists.")
+            return
+
+        val_paths = sorted(glob(os.path.join(val_dir, "*.npz")))
+
+        if not val_paths:
+            print(f"Error: No validation npz files found in {val_dir}")
+            return
+
+        print(f"Found {len(train_paths)} training samples")
+        print(f"Found {len(val_paths)} validation samples")
+
+        print(f"\n{'='*60}")
+        print("Training TransUNet on ABUS dataset (predefined splits)")
+        print(f"{'='*60}")
+
+        best_dice = train_fold(train_paths, val_paths, args.output_dir, args, fold_idx=None)
+
+        print(f"\n{'='*60}")
+        print(f"Training Summary: Best Val Dice = {best_dice:.4f}")
+        print(f"Model saved to: {args.output_dir}")
+        print(f"{'='*60}")
 
 
 if __name__ == "__main__":

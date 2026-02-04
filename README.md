@@ -763,15 +763,49 @@ Each `.npz` file contains:
 
 ### TransUNet on ABUS
 
+Two training modes are supported:
+
+**1. K-Fold Cross-Validation (Recommended)**
+
+Combines train + val data and applies k-fold CV, similar to BUSI/BUSBRA pipeline:
+
 ```bash
-# Train TransUNet
+# Train all 5 folds
+python pipeline/02_train_transunet_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --output_dir outputs/transunet_models/abus_kfold \
+    --n_folds 5 \
+    --max_epochs 1000 --batch_size 4 --base_lr 0.01 \
+    --device cuda:0
+
+# Train single fold (for testing)
+python pipeline/02_train_transunet_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --output_dir outputs/transunet_models/abus_kfold \
+    --n_folds 5 --fold 0 \
+    --max_epochs 5 --device cuda:0
+
+# Run inference on all folds
+python pipeline/03_infer_transunet_abus.py \
+    --data_dir outputs/preprocessed/abus \
+    --model_dir outputs/transunet_models/abus_kfold \
+    --output_dir outputs/transunet_preds/abus_kfold \
+    --device cuda:0
+```
+
+**2. Predefined Splits (Original Mode)**
+
+Uses the train/val directories as-is:
+
+```bash
+# Train with predefined splits
 python pipeline/02_train_transunet_abus.py \
     --data_dir outputs/preprocessed/abus \
     --output_dir outputs/transunet_models/abus \
     --max_epochs 1000 --batch_size 4 --base_lr 0.01 \
     --device cuda:0
 
-# Run TransUNet inference on test set
+# Run inference on test set
 python pipeline/03_infer_transunet_abus.py \
     --data_dir outputs/preprocessed/abus \
     --model_path outputs/transunet_models/abus/best.pth \
@@ -852,11 +886,11 @@ outputs/ultrasam_preds/abus/
 | Aspect | ABUS | BUSI/BUSBRA |
 |--------|------|-------------|
 | Input format | 3D NRRD volumes | 2D PNG images |
-| Splits | Predefined Train/Val/Test | K-fold CV |
+| Splits | K-fold CV (recommended) or predefined | K-fold CV |
 | Preprocessing | `01_preprocess_abus.py` (3D→2D slice extraction) | `01_preprocess.py --dataset busi/busbra` |
 | Slice selection | Max-area slice + optional neighbors | N/A (already 2D) |
-| TransUNet train | `02_train_transunet_abus.py` | `02_train_transunet.py` |
-| TransUNet infer | `03_infer_transunet_abus.py` | `03_infer_transunet.py` |
+| TransUNet train | `02_train_transunet_abus.py` (supports `--n_folds`) | `02_train_transunet.py` |
+| TransUNet infer | `03_infer_transunet_abus.py` (supports `--model_dir`) | `03_infer_transunet.py` |
 | UltraSAM infer | `09_infer_ultrasam_abus.py` | `05_infer_ultrasam.py` |
 | Crop data | `10_generate_crop_data_abus.py` | `07_generate_crop_data.py` |
 | Finetuning | Same (`08_finetune_ultrasam_lora.py`) | Same |
