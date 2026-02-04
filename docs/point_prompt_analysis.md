@@ -226,3 +226,22 @@ Examining the worst 10 cases (Dice diff > 0.86):
 ---
 
 *Analysis generated from experimental results in `outputs/analysis/point_prompts/busi/`*
+
+
+
+
+## Visualization
+
+![alt text](https://file%2B.vscode-resource.vscode-cdn.net/Users/langtian/Desktop/NYU/MS%20Thesis/3D%20SAM%20Foundation%20Model/Med3D/UltraRefiner/outputs/analysis/point_prompts/busi/visualizations/fold_0_malignant_malignant_%28199%29.png?version%3D1770181197865)
+
+![alt text](https://file%2B.vscode-resource.vscode-cdn.net/Users/langtian/Desktop/NYU/MS%20Thesis/3D%20SAM%20Foundation%20Model/Med3D/UltraRefiner/outputs/analysis/point_prompts/busi/visualizations/fold_1_benign_benign_%28119%29.png?version%3D1770181235305)
+
+![alt text](https://file%2B.vscode-resource.vscode-cdn.net/Users/langtian/Desktop/NYU/MS%20Thesis/3D%20SAM%20Foundation%20Model/Med3D/UltraRefiner/outputs/analysis/point_prompts/busi/visualizations/fold_1_benign_benign_%28257%29.png?version%3D1770181252306)
+
+![alt text](https://file%2B.vscode-resource.vscode-cdn.net/Users/langtian/Desktop/NYU/MS%20Thesis/3D%20SAM%20Foundation%20Model/Med3D/UltraRefiner/outputs/analysis/point_prompts/busi/visualizations/fold_2_malignant_malignant_%2884%29.png?version%3D1770181275017)
+
+
+![alt text](https://file%2B.vscode-resource.vscode-cdn.net/Users/langtian/Desktop/NYU/MS%20Thesis/3D%20SAM%20Foundation%20Model/Med3D/UltraRefiner/outputs/analysis/point_prompts/busi/visualizations/fold_3_malignant_malignant_%28192%29.png?version%3D1770181291215)
+
+
+![alt text](https://file%2B.vscode-resource.vscode-cdn.net/Users/langtian/Desktop/NYU/MS%20Thesis/3D%20SAM%20Foundation%20Model/Med3D/UltraRefiner/outputs/analysis/point_prompts/busi/visualizations/fold_3_malignant_malignant_%28116%29.png?version%3D1770181311298)

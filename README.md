@@ -7,7 +7,8 @@ A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation
 | Step | Script | Description |
 |------|--------|-------------|
 | 0 | `pipeline/00_setup.sh` | Clone TransUNet & UltraSAM repos, download pretrained weights |
-| 1 | `pipeline/01_preprocess.py` | Convert raw PNG datasets to `.npz` format |
+| 1 | `pipeline/01_preprocess.py` | Convert raw 2D PNG datasets to `.npz` format |
+| 1-ABUS | `pipeline/01_preprocess_abus.py` | Extract 2D slices from 3D ABUS NRRD volumes (max-area slice) |
 | 2 | `pipeline/02_train_transunet.py` | Train TransUNet with 5-fold cross-validation |
 | 3 | `pipeline/03_infer_transunet.py` | Run TransUNet inference on all validation folds |
 | 4 | `pipeline/04_generate_prompts.py` | Extract bounding-box / point prompts from TransUNet predictions |
@@ -63,7 +64,8 @@ UltraRefiner/
 ├── install_env.sh              # One-command environment setup
 ├── pipeline/
 │   ├── 00_setup.sh
-│   ├── 01_preprocess.py
+│   ├── 01_preprocess.py                # 2D PNG datasets (BUSI, BUSBRA)
+│   ├── 01_preprocess_abus.py           # 3D NRRD volumes (ABUS)
 │   ├── 02_train_transunet.py
 │   ├── 03_infer_transunet.py
 │   ├── 04_generate_prompts.py
@@ -668,36 +670,96 @@ The inference script (`05_infer_ultrasam.py`) automatically detects and loads bo
 
 ---
 
-## ABUS Dataset (3D→2D Slices)
+## ABUS Dataset (3D NRRD → 2D Slices)
 
-The ABUS (Automated Breast Ultrasound System) dataset uses predefined Train/Validation/Test splits instead of k-fold cross-validation.
+The ABUS (Automated Breast Ultrasound System) dataset contains 3D ultrasound volumes in NRRD format with predefined Train/Validation/Test splits. A specialized preprocessing script extracts 2D slices from these 3D volumes.
 
-### Dataset Structure
+### 3D Dataset Structure (Input)
 
 ```
 ABUS/
 ├── Train/
-│   ├── malignant (020)_342.png       # Image
-│   ├── malignant (020)_342_mask.png  # Mask
-│   └── ...
+│   ├── DATA/
+│   │   └── DATA_XXX.nrrd          # 3D ultrasound volume
+│   ├── MASK/
+│   │   └── MASK_XXX.nrrd          # 3D segmentation mask
+│   └── labels.csv                  # Case metadata (case_id, label, paths)
 ├── Validation/
-│   └── ...
-├── Test/
-│   └── ...
-├── Train_metadata.csv
-├── Validation_metadata.csv
-└── Test_metadata.csv
+│   ├── DATA/
+│   ├── MASK/
+│   └── labels.csv
+└── Test/
+    ├── DATA/
+    ├── MASK/
+    └── labels.csv
 ```
 
-### ABUS Quick Start
+### ABUS Preprocessing (3D → 2D)
+
+The `01_preprocess_abus.py` script extracts 2D slices from 3D volumes. For each volume, **only the slice with the largest lesion mask area** in the cross-sectional view is retained by default.
 
 ```bash
-# 1. Preprocess ABUS dataset
-python pipeline/01_preprocess.py \
-    --dataset abus \
-    --data_dir /path/to/ABUS \
+# Only save the slice with maximum mask area (default)
+python pipeline/01_preprocess_abus.py \
+    --data_dir ABUS/ABUS \
     --output_dir outputs/preprocessed/abus
+
+# Save max slice + 2 neighbors above and below (total up to 5 slices)
+python pipeline/01_preprocess_abus.py \
+    --data_dir ABUS/ABUS \
+    --output_dir outputs/preprocessed/abus \
+    --neighbors 2
+
+# Save max slice + 5 neighbors (total up to 11 slices)
+python pipeline/01_preprocess_abus.py \
+    --data_dir ABUS/ABUS \
+    --output_dir outputs/preprocessed/abus \
+    --neighbors 5
 ```
+
+**Parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--data_dir` | (required) | Path to ABUS root containing Train/Validation/Test |
+| `--output_dir` | (required) | Output directory for preprocessed data |
+| `--neighbors` | 0 | Number of neighbor slices above/below max slice to include |
+
+**Slice Selection Logic:**
+1. For each 3D volume, compute mask area for every slice in the depth dimension
+2. Identify the slice with the largest mask area (the "max slice")
+3. If `--neighbors N` is specified, also include up to N slices above and below the max slice
+4. Only slices with non-zero mask area are saved (empty neighbor slices are skipped)
+
+**Output Naming Convention:**
+- Max slice: `{category}_{case_id:03d}_max.npz`
+- Neighbor above max: `{category}_{case_id:03d}_p{offset:02d}.npz` (e.g., `malignant_001_p02.npz`)
+- Neighbor below max: `{category}_{case_id:03d}_n{offset:02d}.npz` (e.g., `benign_042_n01.npz`)
+
+### Preprocessed Output Structure
+
+```
+outputs/preprocessed/abus/
+├── train/
+│   ├── malignant_001_max.npz      # Max slice for case 001
+│   ├── malignant_001_n01.npz      # 1 slice below max (if --neighbors >= 1)
+│   ├── malignant_001_p01.npz      # 1 slice above max
+│   ├── benign_042_max.npz
+│   └── images_fullres/
+│       ├── malignant_001_max.png
+│       └── ...
+├── val/
+│   ├── *.npz
+│   └── images_fullres/*.png
+└── test/
+    ├── *.npz
+    └── images_fullres/*.png
+```
+
+Each `.npz` file contains:
+- `image`: RGB image (H, W, 3), uint8
+- `label`: Binary mask (H, W), uint8
+- `original_size`: Array [H, W]
 
 ### TransUNet on ABUS
 
@@ -773,21 +835,7 @@ python pipeline/09_infer_ultrasam_abus.py \
     --device cuda:0
 ```
 
-### ABUS Output Structure
-
-After preprocessing:
-```
-outputs/preprocessed/abus/
-├── train/
-│   ├── *.npz                # {image, label, original_size}
-│   └── images_fullres/*.png
-├── val/
-│   ├── *.npz
-│   └── images_fullres/*.png
-└── test/
-    ├── *.npz
-    └── images_fullres/*.png
-```
+### ABUS Inference Output Structure
 
 After inference:
 ```
@@ -803,8 +851,10 @@ outputs/ultrasam_preds/abus/
 
 | Aspect | ABUS | BUSI/BUSBRA |
 |--------|------|-------------|
+| Input format | 3D NRRD volumes | 2D PNG images |
 | Splits | Predefined Train/Val/Test | K-fold CV |
-| Preprocessing | `01_preprocess.py --dataset abus` | `01_preprocess.py --dataset busi/busbra` |
+| Preprocessing | `01_preprocess_abus.py` (3D→2D slice extraction) | `01_preprocess.py --dataset busi/busbra` |
+| Slice selection | Max-area slice + optional neighbors | N/A (already 2D) |
 | TransUNet train | `02_train_transunet_abus.py` | `02_train_transunet.py` |
 | TransUNet infer | `03_infer_transunet_abus.py` | `03_infer_transunet.py` |
 | UltraSAM infer | `09_infer_ultrasam_abus.py` | `05_infer_ultrasam.py` |
