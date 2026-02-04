@@ -475,9 +475,10 @@ def validate(model, dataloader, device):
     total_iou = 0
     total_dice = 0
     num_samples = 0
+    debug_printed = False
 
     with torch.no_grad():
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
             images = batch["image"].to(device)
             masks = batch["mask"].to(device)
             data_samples = build_data_sample(batch, device)
@@ -489,6 +490,20 @@ def validate(model, dataloader, device):
             for i, result in enumerate(results):
                 gt_mask = masks[i]
 
+                # Debug: print result structure once
+                if not debug_printed:
+                    print(f"  Debug - Result type: {type(result)}")
+                    if hasattr(result, "pred_instances"):
+                        pred_inst = result.pred_instances
+                        print(f"  Debug - pred_instances keys: {pred_inst.keys() if hasattr(pred_inst, 'keys') else dir(pred_inst)}")
+                        if hasattr(pred_inst, "masks"):
+                            print(f"  Debug - masks type: {type(pred_inst.masks)}, len: {len(pred_inst.masks) if hasattr(pred_inst.masks, '__len__') else 'N/A'}")
+                        else:
+                            print(f"  Debug - No 'masks' attribute in pred_instances")
+                    else:
+                        print(f"  Debug - No 'pred_instances' attribute. Result attrs: {[a for a in dir(result) if not a.startswith('_')]}")
+                    debug_printed = True
+
                 # Try to get prediction mask
                 pred_mask = None
                 if hasattr(result, "pred_instances"):
@@ -498,10 +513,12 @@ def validate(model, dataloader, device):
                         if isinstance(pred_mask, torch.Tensor):
                             pred_mask = pred_mask.float()
                         else:
-                            pred_mask = torch.from_numpy(pred_mask).float().to(device)
+                            pred_mask = torch.from_numpy(np.array(pred_mask)).float().to(device)
 
                 if pred_mask is None:
                     # No valid prediction
+                    if batch_idx == 0 and i == 0:
+                        print(f"  Debug - pred_mask is None for first sample")
                     continue
 
                 # Resize if needed
