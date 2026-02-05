@@ -17,6 +17,7 @@ A cross-validation pipeline that trains **TransUNet** on ultrasound segmentation
 | 7 | `pipeline/07_generate_crop_data.py` | Generate cropped training data for UltraSAM finetuning |
 | 8a | `pipeline/08_finetune_ultrasam_standalone.py` | Finetune UltraSAM on cropped data (full finetuning) |
 | 8b | `pipeline/08_finetune_ultrasam_lora.py` | Finetune UltraSAM with LoRA + optional FFN training |
+| 8c | `pipeline/08_finetune_ultrasam_gt_box.py` | Finetune UltraSAM on GT masks with perturbed box prompts |
 | 9 | `pipeline/09_infer_ultrasam_abus.py` | Direct UltraSAM inference on ABUS dataset |
 | 10 | `pipeline/10_generate_crop_data_abus.py` | Generate crop data from ABUS for finetuning |
 | - | `pipeline/02_train_transunet_abus.py` | Train TransUNet on ABUS (predefined splits) |
@@ -74,6 +75,7 @@ UltraRefiner/
 │   ├── 07_generate_crop_data.py        # Generate cropped data for finetuning
 │   ├── 08_finetune_ultrasam_standalone.py  # Finetune UltraSAM (full)
 │   ├── 08_finetune_ultrasam_lora.py    # Finetune UltraSAM with LoRA
+│   ├── 08_finetune_ultrasam_gt_box.py  # Finetune UltraSAM with perturbed GT boxes
 │   ├── run_crop_finetune.sh            # Convenience script for full pipeline
 │   └── utils/
 │       ├── metrics.py          # Dice, IoU, HD95
@@ -667,6 +669,93 @@ LoRA finetuned checkpoints contain:
 ```
 
 The inference script (`05_infer_ultrasam.py`) automatically detects and loads both original UltraSAM checkpoints and LoRA-finetuned checkpoints
+
+---
+
+## GT Box Finetuning (Perturbed Box Prompts)
+
+Fine-tune UltraSAM directly on preprocessed npz files using ground-truth masks with randomly perturbed bounding box prompts. This improves robustness to imperfect box prompts at inference time.
+
+### Why Perturbed Boxes?
+
+At inference time, box prompts come from TransUNet predictions which are imperfect. Training with exact GT boxes creates a distribution mismatch. By perturbing GT boxes during training, the model learns to handle noisy prompts.
+
+### Box Perturbation Strategies
+
+During training, each sample's GT box is randomly perturbed with one of five strategies:
+
+| Strategy | Default Prob | Edge Perturbation Range |
+|----------|-------------|------------------------|
+| Exact | 10% | No change |
+| Slight enlarge | 40% | Each edge expanded by 5-20% of box size |
+| Slight shrink | 40% | Each edge shrunk by 5-15% of box size |
+| Heavy enlarge | 5% | Each edge expanded by 30-60% of box size |
+| Heavy shrink | 5% | Each edge shrunk by 15-30% of box size |
+
+Each of the 4 box edges (x1, y1, x2, y2) is perturbed **independently**, creating asymmetric variations that simulate realistic detection errors. All boxes are clamped to image bounds with a minimum size of 2px.
+
+### Quick Start
+
+```bash
+# Train all 5 folds with default perturbation ratios
+python pipeline/08_finetune_ultrasam_gt_box.py \
+    --data_dir outputs/preprocessed/busi \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/finetuned_ultrasam_gt_box/busi \
+    --freeze_backbone \
+    --epochs 50 --lr 1e-4 --device cuda:0
+
+# Single fold with custom perturbation ratios
+python pipeline/08_finetune_ultrasam_gt_box.py \
+    --data_dir outputs/preprocessed/busi \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt UltraSam/weights/UltraSam.pth \
+    --output_dir outputs/finetuned_ultrasam_gt_box/busi \
+    --fold 0 \
+    --p_exact 0.20 --p_slight_enlarge 0.30 --p_slight_shrink 0.30 \
+    --p_heavy_enlarge 0.10 --p_heavy_shrink 0.10 \
+    --freeze_all_but_decoder_head \
+    --epochs 100 --batch_size 2
+
+# Inference with finetuned model
+python pipeline/05_infer_ultrasam.py \
+    --prompt_dir outputs/prompts/busi \
+    --image_dir outputs/preprocessed/busi/images_fullres \
+    --ultrasam_config UltraSam/configs/UltraSAM/UltraSAM_full/UltraSAM_box_refine.py \
+    --ultrasam_ckpt outputs/finetuned_ultrasam_gt_box/busi/fold_0/best.pth \
+    --output_dir outputs/ultrasam_preds_gt_box/busi \
+    --prompt_type box --device cuda:0
+```
+
+### Key Design Decisions
+
+- **K-fold cross-validation**: Uses `KFold(n_splits=5, shuffle=True, random_state=123)` matching TransUNet for consistent fold assignments — no data leakage
+- **Perturbation in original pixel space**: Box perturbation is applied before coordinate transformation to 1024-space, so perturbation magnitudes are semantically meaningful relative to the actual object size
+- **Validation with exact boxes**: Validation always uses unperturbed GT boxes for fair metric computation
+- **Horizontal flip augmentation**: Applied to image and mask before box extraction, so box coordinates are always consistent
+- **Original-resolution validation**: Metrics computed at original image resolution (not 1024-space)
+
+### Perturbation Ratio Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--p_exact` | 0.10 | Probability of exact (unperturbed) box |
+| `--p_slight_enlarge` | 0.40 | Probability of slightly enlarged box |
+| `--p_slight_shrink` | 0.40 | Probability of slightly shrunk box |
+| `--p_heavy_enlarge` | 0.05 | Probability of heavily enlarged box |
+| `--p_heavy_shrink` | 0.05 | Probability of heavily shrunk box |
+
+Ratios must sum to 1.0. The script validates this at startup.
+
+### GT Box vs Crop-Based Finetuning
+
+| Aspect | GT Box (this script) | Crop-Based (standalone/LoRA) |
+|--------|---------------------|------------------------------|
+| Data source | Preprocessed npz files directly | COCO-format cropped images |
+| Prompts | Perturbed GT boxes | Exact boxes from crops |
+| Cross-validation | Built-in K-fold CV | Manual per-fold data generation |
+| Goal | Robustness to imperfect prompts | Adaptation to cropped input distribution |
 
 ---
 
