@@ -845,7 +845,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--val_interval", type=int, default=5,
+    parser.add_argument("--val_interval", type=int, default=1,
                         help="Validate every N epochs")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--seed", type=int, default=42,
