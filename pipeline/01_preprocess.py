@@ -99,7 +99,9 @@ def preprocess_busi(data_dir: str, output_dir: str) -> None:
 def preprocess_busbra(data_dir: str, output_dir: str) -> None:
     """Preprocess BUSBRA dataset.
 
-    Structure: data_dir/Images/<id>.png, data_dir/Masks/<id>.png
+    Structure: data_dir/Images/bus_XXXX-Y.png, data_dir/Masks/mask_XXXX-Y.png
+    Images are named bus_* while corresponding masks are named mask_* with the
+    same suffix (e.g., bus_0001-l.png -> mask_0001-l.png).
     """
     npz_dir = output_dir
     img_dir = os.path.join(output_dir, "images_fullres")
@@ -115,12 +117,20 @@ def preprocess_busbra(data_dir: str, output_dir: str) -> None:
 
     image_files = sorted(glob(os.path.join(images_dir, "*.png")))
     count = 0
+    skipped = 0
     for img_path in image_files:
         basename = os.path.splitext(os.path.basename(img_path))[0]
-        mask_path = os.path.join(masks_dir, f"{basename}.png")
+        # BUSBRA naming: images are bus_XXXX-Y, masks are mask_XXXX-Y
+        # Replace leading "bus_" with "mask_" to find the corresponding mask
+        if basename.startswith("bus_"):
+            mask_name = "mask_" + basename[len("bus_"):]
+        else:
+            mask_name = basename
+        mask_path = os.path.join(masks_dir, f"{mask_name}.png")
 
         if not os.path.exists(mask_path):
-            print(f"Warning: No mask for {basename}, skipping.")
+            print(f"Warning: No mask for {basename} (tried {mask_name}.png), skipping.")
+            skipped += 1
             continue
 
         image = cv2.imread(img_path, cv2.IMREAD_COLOR)
@@ -145,6 +155,8 @@ def preprocess_busbra(data_dir: str, output_dir: str) -> None:
         count += 1
 
     print(f"BUSBRA preprocessing complete: {count} samples saved to {output_dir}")
+    if skipped:
+        print(f"  ({skipped} images skipped due to missing masks)")
 
 
 def preprocess_abus(data_dir: str, output_dir: str) -> None:
